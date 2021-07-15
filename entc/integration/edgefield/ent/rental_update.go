@@ -50,14 +50,12 @@ func (ru *RentalUpdate) SetNillableDate(t *time.Time) *RentalUpdate {
 
 // SetCarID sets the "car_id" field.
 func (ru *RentalUpdate) SetCarID(i int) *RentalUpdate {
-	ru.mutation.ResetCarID()
 	ru.mutation.SetCarID(i)
 	return ru
 }
 
 // SetUserID sets the "user_id" field.
 func (ru *RentalUpdate) SetUserID(i int) *RentalUpdate {
-	ru.mutation.ResetUserID()
 	ru.mutation.SetUserID(i)
 	return ru
 }
@@ -255,8 +253,8 @@ func (ru *RentalUpdate) sqlSave(ctx context.Context) (n int, err error) {
 	if n, err = sqlgraph.UpdateNodes(ctx, ru.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{rental.Label}
-		} else if cerr, ok := isSQLConstraintError(err); ok {
-			err = cerr
+		} else if sqlgraph.IsConstraintError(err) {
+			err = &ConstraintError{err.Error(), err}
 		}
 		return 0, err
 	}
@@ -287,14 +285,12 @@ func (ruo *RentalUpdateOne) SetNillableDate(t *time.Time) *RentalUpdateOne {
 
 // SetCarID sets the "car_id" field.
 func (ruo *RentalUpdateOne) SetCarID(i int) *RentalUpdateOne {
-	ruo.mutation.ResetCarID()
 	ruo.mutation.SetCarID(i)
 	return ruo
 }
 
 // SetUserID sets the "user_id" field.
 func (ruo *RentalUpdateOne) SetUserID(i int) *RentalUpdateOne {
-	ruo.mutation.ResetUserID()
 	ruo.mutation.SetUserID(i)
 	return ruo
 }
@@ -519,8 +515,8 @@ func (ruo *RentalUpdateOne) sqlSave(ctx context.Context) (_node *Rental, err err
 	if err = sqlgraph.UpdateNode(ctx, ruo.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{rental.Label}
-		} else if cerr, ok := isSQLConstraintError(err); ok {
-			err = cerr
+		} else if sqlgraph.IsConstraintError(err) {
+			err = &ConstraintError{err.Error(), err}
 		}
 		return nil, err
 	}

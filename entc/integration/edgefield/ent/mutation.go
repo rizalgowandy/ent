@@ -215,6 +215,7 @@ func (m *CarMutation) RemoveRentalIDs(ids ...int) {
 		m.removedrentals = make(map[int]struct{})
 	}
 	for i := range ids {
+		delete(m.rentals, ids[i])
 		m.removedrentals[ids[i]] = struct{}{}
 	}
 }
@@ -3034,6 +3035,12 @@ func (m UserMutation) Tx() (*Tx, error) {
 	return tx, nil
 }
 
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of User entities.
+func (m *UserMutation) SetID(id int) {
+	m.id = &id
+}
+
 // ID returns the ID value in the mutation. Note that the ID is only available
 // if it was provided to the builder or after it was returned from the database.
 func (m *UserMutation) ID() (id int, exists bool) {
@@ -3167,6 +3174,7 @@ func (m *UserMutation) RemovePetIDs(ids ...int) {
 		m.removedpets = make(map[int]struct{})
 	}
 	for i := range ids {
+		delete(m.pets, ids[i])
 		m.removedpets[ids[i]] = struct{}{}
 	}
 }
@@ -3246,6 +3254,7 @@ func (m *UserMutation) RemoveChildIDs(ids ...int) {
 		m.removedchildren = make(map[int]struct{})
 	}
 	for i := range ids {
+		delete(m.children, ids[i])
 		m.removedchildren[ids[i]] = struct{}{}
 	}
 }
@@ -3403,6 +3412,7 @@ func (m *UserMutation) RemoveInfoIDs(ids ...int) {
 		m.removedinfo = make(map[int]struct{})
 	}
 	for i := range ids {
+		delete(m.info, ids[i])
 		m.removedinfo[ids[i]] = struct{}{}
 	}
 }
@@ -3456,6 +3466,7 @@ func (m *UserMutation) RemoveRentalIDs(ids ...int) {
 		m.removedrentals = make(map[int]struct{})
 	}
 	for i := range ids {
+		delete(m.rentals, ids[i])
 		m.removedrentals[ids[i]] = struct{}{}
 	}
 }
