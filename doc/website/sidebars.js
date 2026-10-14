@@ -16,6 +16,7 @@ module.exports = {
         'schema-fields',
         'schema-edges',
         'schema-indexes',
+        'schema-views',
         'schema-mixin',
         'schema-annotations',
       ],
@@ -30,6 +31,7 @@ module.exports = {
         'traversals',
         'eager-load',
         'hooks',
+        'interceptors',
         'privacy',
         'transactions',
         'predicates',
@@ -42,7 +44,24 @@ module.exports = {
       type: 'category',
       label: 'Migration',
       items: [
+        'versioned-migrations',
+        {
+          type: 'category',
+          label: 'External Objects',
+          items: [
+            {type: 'doc', id: 'migration/composite', label: 'Composite Types'},
+            {type: 'doc', id: 'migration/domain', label: 'Domain Types'},
+            {type: 'doc', id: 'migration/enum', label: 'Enum Types'},
+            {type: 'doc', id: 'migration/extension', label: 'Extensions'},
+            {type: 'doc', id: 'migration/functional-indexes', label: 'Functional Indexes'},
+            {type: 'doc', id: 'migration/rls', label: 'Row-Level Security'},
+            {type: 'doc', id: 'migration/trigger', label: 'Triggers'},
+          ],
+          collapsed: false,
+        },
+        'multischema-migrations',
         'migrate',
+        'data-migrations',
         'dialects',
       ],
       collapsed: false,
@@ -55,14 +74,15 @@ module.exports = {
         'extensions',
         'graphql',
         'sql-integration',
+        'ci',
         'testing',
         'faq',
-        'generating-ent-schemas',
         'feature-flags',
+        'generating-ent-schemas',
         'translations',
         'contributors',
         'writing-docs',
-        'slack'
+        'community'
       ],
       collapsed: false,
     },
@@ -88,6 +108,7 @@ module.exports = {
         'tutorial-todo-gql-tx-mutation',
         'tutorial-todo-gql-mutation-input',
         'tutorial-todo-gql-filter-input',
+        'tutorial-todo-gql-schema-generator',
       ],
       collapsed: false,
     },
@@ -103,6 +124,43 @@ module.exports = {
           'grpc-server-and-client',
           'grpc-edges',
           'grpc-optional-fields',
+          'grpc-service-generation-options',
+          'grpc-external-service',
+      ]
+    },
+    {
+      type: 'category',
+      collapsed: false,
+      label: 'Versioned Migrations',
+      items: [
+        {
+          type: 'doc',
+          id: 'versioned/intro',
+        },
+        {
+          type: 'doc',
+          id: 'versioned/auto-plan',
+        },
+        {
+          type: 'doc',
+          id: 'versioned/upgrade-prod',
+        },
+        {
+          type: 'doc',
+          id: 'versioned/new-migration',
+        },
+        {
+          type: 'doc',
+          id: 'versioned/custom-migrations',
+        },
+        {
+          type: 'doc',
+          id: 'versioned/verifying-safety',
+        },
+        {
+          type: 'doc',
+          id: 'versioned/programmatically',
+        },
       ]
     }
   ]

@@ -30,6 +30,9 @@ func (File) Annotations() []schema.Annotation {
 // Fields of the File.
 func (File) Fields() []ent.Field {
 	return []ent.Field{
+		field.Int("set_id").
+			Max(10).
+			Optional(),
 		field.Int("size").
 			StorageKey("fsize").
 			Default(math.MaxInt32).
@@ -42,6 +45,13 @@ func (File) Fields() []ent.Field {
 			Optional(),
 		field.Bool("op").
 			Optional(),
+		// Skip generating the "FieldID" predicate
+		// as it conflicts with the "FieldID" constant.
+		field.Int("field_id").
+			Optional(),
+		field.Time("create_time").
+			Optional().
+			Unique(),
 	}
 }
 

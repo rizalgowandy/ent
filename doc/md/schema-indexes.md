@@ -150,7 +150,7 @@ The full example exists in [GitHub](https://github.com/ent/ent/tree/master/examp
 
 ## Index On Edge Fields
 
-Currently `Edges` columns are always added after `Fields` columns. However, some indexes require these columns to come first in order to achieve specific optimizations. You can work around this problem by making use of [Edge Fields](schema-edges.md#edge-field). 
+Currently `Edges` columns are always added after `Fields` columns. However, some indexes require these columns to come first in order to achieve specific optimizations. You can work around this problem by making use of [Edge Fields](schema-edges.mdx#edge-field). 
 
 ```go
 // Card holds the schema definition for the Card entity.
@@ -185,8 +185,7 @@ func (Card) Indexes() []ent.Index {
 
 ## Dialect Support
 
-Indexes currently support only SQL dialects, and do not support Gremlin. Dialect specific features are allowed using
-[annotations](schema-annotations.md). For example, in order to use [index prefixes](https://dev.mysql.com/doc/refman/8.0/en/column-indexes.html#column-indexes-prefix)
+Dialect specific features are allowed using [annotations](schema-annotations.md). For example, in order to use [index prefixes](https://dev.mysql.com/doc/refman/8.0/en/column-indexes.html#column-indexes-prefix)
 in MySQL, use the following configuration:
 
 ```go
@@ -196,7 +195,7 @@ func (User) Indexes() []ent.Index {
 		index.Fields("description").
 			Annotations(entsql.Prefix(128)),
 		index.Fields("c1", "c2", "c3").
-			Annotation(
+			Annotations(
 				entsql.PrefixColumn("c1", 100),
 				entsql.PrefixColumn("c2", 200),
 			)
@@ -212,3 +211,90 @@ CREATE INDEX `users_description` ON `users`(`description`(128))
 CREATE INDEX `users_c1_c2_c3` ON `users`(`c1`(100), `c2`(200), `c3`)
 ```
 
+## Atlas Support
+
+Starting with v0.10, Ent running migration with [Atlas](https://github.com/ariga/atlas). This option provides
+more control on indexes such as, configuring their types or define indexes in a reverse order.
+
+```go
+func (User) Indexes() []ent.Index {
+    return []ent.Index{
+        index.Fields("c1").
+            Annotations(entsql.Desc()),
+        index.Fields("c1", "c2", "c3").
+            Annotations(entsql.DescColumns("c1", "c2")),
+        index.Fields("c4").
+            Annotations(entsql.IndexType("HASH")),
+        // Enable FULLTEXT search on MySQL,
+        // and GIN on PostgreSQL.
+        index.Fields("c5").
+            Annotations(
+                entsql.IndexTypes(map[string]string{
+                    dialect.MySQL:    "FULLTEXT",
+                    dialect.Postgres: "GIN",
+                }),
+            ),
+		// For PostgreSQL, we can include in the index
+		// non-key columns.
+		index.Fields("workplace").
+			Annotations(
+				entsql.IncludeColumns("address"),
+			),
+		// Define a partial index on SQLite and PostgreSQL.
+		index.Fields("nickname").
+			Annotations(
+				entsql.IndexWhere("active"),
+			),	
+		// Define a custom operator class.
+		index.Fields("phone").
+			Annotations(
+				entsql.OpClass("bpchar_pattern_ops"),
+			),
+    }
+}
+```
+
+The code above generates the following SQL statements:
+
+```sql
+CREATE INDEX `users_c1` ON `users` (`c1` DESC)
+
+CREATE INDEX `users_c1_c2_c3` ON `users` (`c1` DESC, `c2` DESC, `c3`)
+
+CREATE INDEX `users_c4` ON `users` USING HASH (`c4`)
+
+-- MySQL only.
+CREATE FULLTEXT INDEX `users_c5` ON `users` (`c5`)
+
+-- PostgreSQL only.
+CREATE INDEX "users_c5" ON "users" USING GIN ("c5")
+
+-- Include index-only scan on PostgreSQL.
+CREATE INDEX "users_workplace" ON "users" ("workplace") INCLUDE ("address")
+
+-- Define partial index on SQLite and PostgreSQL.
+CREATE INDEX "users_nickname" ON "users" ("nickname") WHERE "active"
+
+-- PostgreSQL only.
+CREATE INDEX "users_phone" ON "users" ("phone" bpchar_pattern_ops)
+```
+
+## Functional Indexes
+
+The Ent schema supports defining indexes on fields and edges (foreign-keys), but there is no API for defining index
+parts as expressions, such as function calls. If you are using [Atlas](https://atlasgo.io/docs) for managing schema
+migrations, you can define functional indexes as described in [this guide](/docs/migration/functional-indexes).
+
+## Storage Key
+
+Like Fields, custom index name can be configured using the `StorageKey` method.
+It's mapped to an index name in SQL dialects.
+
+```go
+func (User) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("field1", "field2").
+			StorageKey("custom_index"),
+	}
+}
+```

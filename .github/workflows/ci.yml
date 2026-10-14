@@ -13,28 +13,35 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2.3.5
-      - name: Run linters
-        uses: golangci/golangci-lint-action@v2.5.2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          version: v1.42
+          go-version-file: './go.mod'
+      - name: Run linters
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          args: --verbose
 
   unit:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: ['1.17', '1.16']
+        go: ['1.26', '1.27']
     steps:
-      - uses: actions/checkout@v2.3.5
-      - uses: actions/setup-go@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-      - uses: actions/cache@v2.1.6
+      - uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
+      - name: Run cmd tests
+        run: go test -race ./...
+        working-directory: cmd
       - name: Run dialect tests
         run: go test -race ./...
         working-directory: dialect
@@ -54,24 +61,31 @@ jobs:
   generate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2.3.5
-      - uses: actions/setup-go@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.17'
-      - uses: actions/cache@v2.1.6
+          go-version-file: './go.mod'
+      - uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
       - name: Run go generate
-        run: go generate ./...
+        run: go generate ./... && go mod tidy
+      - name: Run go generate on examples directory
+        working-directory: examples
+        run: go generate ./... && go mod tidy
+      - name: Run go generate on integration directory
+        working-directory: entc/integration
+        run: go generate ./... && go mod tidy
       - name: Check generated files
         run: |
           status=$(git status --porcelain)
           if [ -n "$status" ]; then
-            echo "you need to run 'go generate ./...' and commit the changes"
+            echo "you need to run 'go generate ./...' in root and 'examples' dirs and commit the changes"
             echo "$status"
+            git --no-pager diff
             exit 1
           fi
 
@@ -118,7 +132,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       maria:
-        image: mariadb
+        image: mariadb:10.4 # Temporary to unblock PRs from failing.
         env:
           MYSQL_DATABASE: test
           MYSQL_ROOT_PASSWORD: pass
@@ -216,6 +230,42 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      postgres15:
+        image: postgres:15
+        env:
+          POSTGRES_DB: test
+          POSTGRES_PASSWORD: pass
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres16:
+        image: postgres:16
+        env:
+          POSTGRES_DB: test
+          POSTGRES_PASSWORD: pass
+        ports:
+          - 5436:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres17:
+        image: postgres:17
+        env:
+          POSTGRES_DB: test
+          POSTGRES_PASSWORD: pass
+        ports:
+          - 5437:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
       gremlin-server:
         image: entgo/gremlin-server
         ports:
@@ -226,11 +276,11 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v2.3.5
-      - uses: actions/setup-go@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.17'
-      - uses: actions/cache@v2.1.6
+          go-version-file: './go.mod'
+      - uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
@@ -238,7 +288,7 @@ jobs:
             ${{ runner.os }}-go-
       - name: Run integration tests
         working-directory: entc/integration
-        run: go test -race -count=2 -tags='json1' ./...
+        run: go test -race -count=2 ./...
 
   migration:
     runs-on: ubuntu-latest
@@ -284,7 +334,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       maria:
-        image: mariadb
+        image: mariadb:10.4 # Temporary to unblock PRs from failing.
         env:
           MYSQL_DATABASE: test
           MYSQL_ROOT_PASSWORD: pass
@@ -382,6 +432,42 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      postgres15:
+        image: postgres:15
+        env:
+          POSTGRES_DB: test
+          POSTGRES_PASSWORD: pass
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres16:
+        image: postgres:16
+        env:
+          POSTGRES_DB: test
+          POSTGRES_PASSWORD: pass
+        ports:
+          - 5436:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres17:
+        image: postgres:17
+        env:
+          POSTGRES_DB: test
+          POSTGRES_PASSWORD: pass
+        ports:
+          - 5437:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
       gremlin-server:
         image: entgo/gremlin-server
         ports:
@@ -392,13 +478,13 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v2.3.5
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v2
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.17'
-      - uses: actions/cache@v2.1.6
+          go-version-file: './go.mod'
+      - uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
@@ -408,9 +494,9 @@ jobs:
         run: git checkout origin/master
       - name: Run integration on origin/master
         working-directory: entc/integration
-        run: go test -race -count=2 -tags='json1' ./...
+        run: go test -race -count=2 ./...
       - name: Checkout previous HEAD
         run: git checkout -
       - name: Run integration on HEAD
         working-directory: entc/integration
-        run: go test -race -count=2 -tags='json1' ./...
+        run: go test -race -count=2 ./...

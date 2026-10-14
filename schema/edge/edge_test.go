@@ -20,8 +20,10 @@ func TestEdge(t *testing.T) {
 	type User struct{ ent.Schema }
 	e := edge.To("friends", User.Type).
 		Required().
+		Comment("comment").
 		Descriptor()
 	assert.False(e.Inverse)
+	assert.Equal("comment", e.Comment)
 	assert.Equal("User", e.Type)
 	assert.Equal("friends", e.Name)
 	assert.True(e.Required)
@@ -29,19 +31,23 @@ func TestEdge(t *testing.T) {
 	type Node struct{ ent.Schema }
 	e = edge.To("parent", Node.Type).
 		Unique().
+		Immutable().
 		Descriptor()
 	assert.False(e.Inverse)
 	assert.True(e.Unique)
 	assert.Equal("Node", e.Type)
 	assert.Equal("parent", e.Name)
 	assert.False(e.Required)
+	assert.True(e.Immutable)
 
 	e = edge.To("children", Node.Type).
 		From("parent").
 		Unique().
+		Comment("comment").
 		Field("parent_id").
 		Descriptor()
 	assert.Equal("parent_id", e.Field)
+	assert.Equal("comment", e.Comment)
 	assert.Empty(e.Ref.Field)
 
 	t.Log("m2m relation of the same type")

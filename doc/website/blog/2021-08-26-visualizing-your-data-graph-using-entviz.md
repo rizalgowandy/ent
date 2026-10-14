@@ -84,7 +84,7 @@ Open the html file with your favorite browser to see the visualization
 
 Next, let's add another entity named Post, and see how our visualization changes:
 ```bash
-ent init Post
+ent new Post
 ```
 ```go title="ent/schema/post.go"
 // Fields of the Post.
@@ -168,12 +168,13 @@ That's it! now we have a new method in ent package.
 
 We saw how ER diagrams help developers keep track of their data model. Next, we introduced entviz - an Ent extension that automatically generates an ER diagram for Ent schemas. We saw how entviz utilizes Ent's extension API to extend the code generation and add extra functionality. Finally, you got to see it in action by installing and use entviz in your own project. If you like the code and/or want to contribute - feel free to checkout the [project on github](https://github.com/hedwigz/entviz).
 
-Have questions? Need help with getting started? Feel free to [join our Slack channel](https://entgo.io/docs/slack/).
+Have questions? Need help with getting started? Feel free to join our [Discord server](https://discord.gg/qZmPgTE6RX) or [Slack channel](https://entgo.io/docs/slack/).
 
 :::note For more Ent news and updates:
 
-- Subscribe to our [Newsletter](https://www.getrevue.co/profile/ent)
+- Subscribe to our [Newsletter](https://entgo.substack.com/)
 - Follow us on [Twitter](https://twitter.com/entgo_io)
 - Join us on #ent on the [Gophers Slack](https://entgo.io/docs/slack)
+- Join us on the [Ent Discord Server](https://discord.gg/qZmPgTE6RX)
 
 :::

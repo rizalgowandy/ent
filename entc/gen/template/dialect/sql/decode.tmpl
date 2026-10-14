@@ -9,9 +9,20 @@ in the LICENSE file in the root directory of this source tree.
 {{ define "dialect/sql/decode/one" }}
 {{ $receiver := $.Receiver }}
 
-{{ $idscantype := $.ID.NewScanType }}{{ if not $.ID.UserDefined }}{{ $idscantype = "new(sql.NullInt64)" }}{{ end }}
-{{ $ctypes := dict $idscantype (list $.ID.Constant) }}
+{{ $ctypes := dict }}
+{{ if $.HasOneFieldID }}
+	{{- if not $.ID.HasValueScanner }}
+		{{ $idscantype := $.ID.NewScanType }}
+		{{ $ctypes = set $ctypes $idscantype (list $.ID.Constant) }}
+	{{- end }}
+{{ end }}
 {{ range $f := $.Fields }}
+	{{- if $f.HasValueScanner }}
+		{{- continue }}
+	{{- end }}
+	{{- if or $f.IsBlobNoColumn $f.IsBlobLazy }}
+		{{- continue }}
+	{{- end }}
 	{{ $names := list }}
 	{{ if hasKey $ctypes $f.NewScanType }}
 		{{ $names = get $ctypes $f.NewScanType }}
@@ -21,21 +32,37 @@ in the LICENSE file in the root directory of this source tree.
 {{ end }}
 
 // scanValues returns the types for scanning values from sql.Rows.
-func (*{{ $.Name }}) scanValues(columns []string) ([]interface{}, error) {
-	values := make([]interface{}, len(columns))
+func (*{{ $.Name }}) scanValues(columns []string) ([]any, error) {
+	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+			{{- if and $.HasOneFieldID $.ID.HasValueScanner }}
+				case {{ $.Package }}.{{ $.ID.Constant }}:
+					values[i] = {{ $.ID.ScanValueFunc }}()
+			{{- end }}
 			{{- range $type, $columns := $ctypes }}
 				case {{ range $i, $c := $columns }}{{ if ne $i 0 }},{{ end }}{{ $.Package }}.{{ $c }}{{ end }}:
 					values[i] = {{ $type }}
+			{{- end }}
+			{{- range $f := $.Fields }}
+				{{- if $f.IsBlobNoColumn }}{{ continue }}{{ end }}
+				{{- if $f.HasValueScanner }}
+					case {{ $.Package }}.{{ $f.Constant }}:
+						values[i] = {{ $f.ScanValueFunc }}()
+				{{- end }}
 			{{- end }}
 			{{- range $i, $fk := $.UnexportedForeignKeys }}
 				{{- $f := $fk.Field }}
 				case {{ $.Package }}.ForeignKeys[{{ $i }}]: // {{ $f.Name }}
 					values[i] = {{ if not $f.UserDefined }}new(sql.NullInt64){{ else }}{{ $f.NewScanType }}{{ end }}
 			{{- end }}
+			{{- range $i, $bk := $.BlobKeys }}
+				case {{ $.Package }}.BlobKeys[{{ $i }}]: // {{ $bk.Field.Name }}
+					values[i] = new(sql.NullString)
+			{{- end }}
 			default:
-				return nil, fmt.Errorf("unexpected column %q for type {{ $.Name }}", columns[i])
+				{{- /* In case of unknown column that was added by a modifier, predicate, etc., fallback to any. */}}
+				values[i] = new(sql.UnknownType)
 		}
 	}
 	return values, nil
@@ -43,40 +70,44 @@ func (*{{ $.Name }}) scanValues(columns []string) ([]interface{}, error) {
 
 // assignValues assigns the values that were returned from sql.Rows (after scanning)
 // to the {{ $.Name }} fields.
-func ({{ $receiver }} *{{ $.Name }}) assignValues(columns []string, values []interface{}) error {
+func ({{ $receiver }} *{{ $.Name }}) assignValues(columns []string, values []any) error {
 	if m, n := len(values), len(columns); m < n {
 		return fmt.Errorf("mismatch number of scan values: %d != %d", m, n)
 	}
-	{{- $idx := "i" }}{{ if eq $idx $receiver }}{{ $idx = "j" }}{{ end }}
-	for {{ $idx }} := range columns {
-		switch columns[{{ $idx }}] {
-		case {{ $.Package }}.{{ $.ID.Constant }}:
-			{{- if and $.ID.UserDefined (or $.ID.IsString $.ID.IsUUID $.ID.IsBytes) }}
-				{{- with extend $ "Idx" $idx "Field" $.ID "Rec" $receiver }}
-					{{ template "dialect/sql/decode/field" . }}
+	for i := range columns {
+		switch columns[i] {
+		{{- if $.HasOneFieldID }}
+			case {{ $.Package }}.{{ $.ID.Constant }}:
+				{{- if or $.ID.IsString $.ID.IsBytes $.ID.HasGoType $.ID.HasValueScanner }}
+					{{- with extend $ "Idx" "i" "Field" $.ID "Rec" $receiver }}
+						{{ template "dialect/sql/decode/field" . }}
+					{{- end }}
+				{{- else }}
+					value, ok := values[i].(*sql.NullInt64)
+					if !ok {
+						return fmt.Errorf("unexpected type %T for field id", value)
+					}
+					{{ $receiver }}.ID = {{ $.ID.Type }}(value.Int64)
 				{{- end }}
-			{{- else }}
-				value, ok := values[{{ $idx }}].(*sql.NullInt64)
-				if !ok {
-					return fmt.Errorf("unexpected type %T for field id", value)
-				}
-				{{ $receiver }}.ID = {{ $.ID.Type }}(value.Int64)
-			{{- end }}
+		{{- end }}
 		{{- range  $f := $.Fields }}
+			{{- if or $f.IsBlobNoColumn $f.IsBlobLazy }}
+				{{- continue }}
+			{{- end }}
 			case {{ $.Package }}.{{ $f.Constant }}:
-				{{- with extend $ "Idx" $idx "Field" $f "Rec" $receiver }}
+				{{- with extend $ "Idx" "i" "Field" $f "Rec" $receiver }}
 					{{ template "dialect/sql/decode/field" . }}
 				{{- end }}
 		{{- end }}
 		{{- range $i, $fk := $.UnexportedForeignKeys }}
 			{{- $f := $fk.Field }}
 			case {{ if $fk.UserDefined }}{{ $.Package }}.{{ $.ID.Constant }}{{ else }}{{ $.Package }}.ForeignKeys[{{ $i }}]{{ end }}:
-				{{- if or $fk.UserDefined (and $f.UserDefined (or $f.IsString $f.IsUUID $f.IsBytes)) }}
-					{{- with extend $ "Idx" $idx "Field" $f "Rec" $receiver "StructField" $fk.StructField }}
+				{{- if or $fk.UserDefined (and $f.UserDefined (or $f.IsString $f.IsBytes $f.HasGoType)) }}
+					{{- with extend $ "Idx" "i" "Field" $f "Rec" $receiver "StructField" $fk.StructField }}
 						{{ template "dialect/sql/decode/field" . }}
 					{{- end }}
 				{{- else }}
-					if value, ok := values[{{ $idx }}].(*sql.NullInt64); !ok {
+					if value, ok := values[i].(*sql.NullInt64); !ok {
 						return fmt.Errorf("unexpected type %T for edge-field {{ $f.Name}}", value)
 					} else if value.Valid {
 						{{ $receiver }}.{{ $fk.StructField }} = new({{ $f.Type }})
@@ -84,9 +115,26 @@ func ({{ $receiver }} *{{ $.Name }}) assignValues(columns []string, values []int
 					}
 				{{- end }}
 		{{- end }}
+		{{- range $i, $bk := $.BlobKeys }}
+			case {{ $.Package }}.BlobKeys[{{ $i }}]:
+				if value, ok := values[i].(*sql.NullString); !ok {
+					return fmt.Errorf("unexpected type %T for field {{ $bk.Field.Name }}", values[i])
+				} else if value.Valid {
+					{{ $receiver }}.{{ $bk.StructField }} = &value.String
+				}
+		{{- end }}
+		default:
+			{{- /* In case of no match, allow getting this value by its name. */}}
+			{{ $receiver }}.selectValues.Set(columns[i], values[i])
 		}
 	}
 	return nil
+}
+
+// {{ $.ValueName }} returns the ent.Value that was dynamically selected and assigned to the {{ $.Name }}.
+// This includes values selected through modifiers, order, etc.
+func ({{ $receiver }} *{{ $.Name }}) {{ $.ValueName }}(name string) (ent.Value, error) {
+	return {{ $receiver }}.selectValues.Get(name)
 }
 {{ end }}
 
@@ -95,7 +143,13 @@ func ({{ $receiver }} *{{ $.Name }}) assignValues(columns []string, values []int
 	{{- $f := $.Scope.Field -}}
 	{{- $ret := $.Scope.Rec -}}
 	{{- $field := $f.StructField }}{{ with $.Scope.StructField }}{{ $field = . }}{{ end -}}
-	{{- if $f.IsJSON -}}
+	{{- if $f.HasValueScanner -}}
+		if value, err := {{ $f.FromValueFunc }}(values[{{ $i }}]); err != nil {
+			return err
+		} else {
+			{{ $ret }}.{{ $field }} = value
+		}
+	{{- else if $f.IsJSON -}}
 		if value, ok := values[{{ $i }}].(*{{ $f.ScanType }}); !ok {
 			return fmt.Errorf("unexpected type %T for field {{ $f.Name }}", values[{{ $i }}])
 		} else if value != nil && len(*value) > 0 {

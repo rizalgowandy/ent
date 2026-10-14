@@ -8,10 +8,13 @@ in the LICENSE file in the root directory of this source tree.
 
 {{ define "dialect/gremlin/create" }}
 {{ $builder := pascal $.Scope.Builder }}
-{{ $receiver := receiver $builder }}
+{{ $receiver := $.Scope.Receiver }}
 {{ $mutation := print $receiver ".mutation"  }}
 
 func ({{ $receiver }} *{{ $builder }}) gremlinSave(ctx context.Context) (*{{ $.Name }}, error) {
+	if err := {{ $receiver }}.check(); err != nil {
+		return nil, err
+	}
 	res := &gremlin.Response{}
 	query, bindings := {{ $receiver }}.gremlin().Query()
 	if err := {{ $receiver }}.driver.Exec(ctx, query, bindings, res); err != nil {
@@ -20,11 +23,15 @@ func ({{ $receiver }} *{{ $builder }}) gremlinSave(ctx context.Context) (*{{ $.N
 	if err, ok := isConstantError(res); ok {
 		return nil, err
 	}
-	{{ $.Receiver }} := &{{ $.Name }}{config: {{ $receiver }}.config}
-	if err := {{ $.Receiver }}.FromResponse(res); err != nil {
+	rnode := &{{ $.Name }}{config: {{ $receiver }}.config}
+	if err := rnode.FromResponse(res); err != nil {
 		return nil, err
 	}
-	return {{ $.Receiver }}, nil
+	{{- if $.HasOneFieldID }}
+		{{ $mutation }}.{{ $.ID.BuilderField }} = &rnode.{{ $.ID.StructField }}
+		{{ $mutation }}.done = true
+	{{- end }}
+	return rnode, nil
 }
 
 func ({{ $receiver }} *{{ $builder }}) gremlin() *dsl.Traversal {
@@ -42,6 +49,7 @@ func ({{ $receiver }} *{{ $builder }}) gremlin() *dsl.Traversal {
 		}
 	{{- end }}
 	{{- range $f := $.MutationFields }}
+		{{- if $f.IsBlob }}{{ continue }}{{ end }}
 		if value, ok := {{ $mutation }}.{{ $f.MutationGet }}(); ok {
 			{{- if $f.Unique }}
 				constraints = append(constraints, &constraint{

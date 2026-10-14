@@ -9,9 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
+	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/dialect/sql/schema"
 	"entgo.io/ent/entc/load"
+	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 
 	"github.com/stretchr/testify/require"
@@ -123,7 +127,11 @@ func TestNewGraph(t *testing.T) {
 	require.Equal(graph.Nodes[0], e1.Type)
 
 	require.Equal("t2_m2m_from", t2.Edges[5].Name)
+	require.Equal("t2_m2m_to", t2.Edges[5].Inverse)
 	require.Equal("t2_m2m_to", t2.Edges[6].Name)
+	require.Empty(t2.Edges[6].Inverse)
+	require.Equal(t2.Edges[6], t2.Edges[5].Ref)
+	require.Equal(t2.Edges[5], t2.Edges[6].Ref)
 	require.Equal(map[string]string{"Name": "From"}, t2.Edges[5].Annotations["GQL"])
 	require.Equal(map[string]string{"Name": "To"}, t2.Edges[6].Annotations["GQL"])
 }
@@ -208,7 +216,49 @@ func TestNewGraphDuplicateEdgeField(t *testing.T) {
 				{Name: "parent", Type: "User"},
 			},
 		})
-	require.EqualError(t, err, `entc/gen: User schema can't contain field and edge with the same name "parent"`)
+	require.EqualError(t, err, `entc/gen: User schema cannot contain field and edge with the same name "parent"`)
+}
+
+func TestNewGraphThroughUndefinedType(t *testing.T) {
+	_, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, &load.Schema{
+		Name: "T1",
+		Edges: []*load.Edge{
+			{Name: "groups", Type: "T1", Required: true, Through: &struct{ N, T string }{N: "groups_edge", T: "T2"}},
+		},
+	})
+	require.EqualError(t, err, `entc/gen: resolving edges: edge T1.groups defined with Through("groups_edge", T2.Type), but type T2 was not found`)
+}
+
+func TestNewGraphThroughInvalidRel(t *testing.T) {
+	_, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, &load.Schema{
+		Name: "T1",
+		Edges: []*load.Edge{
+			{Name: "groups", Type: "T1", Unique: true, Required: true, Through: &struct{ N, T string }{N: "groups_edge", T: "T2"}},
+		},
+	})
+	require.EqualError(t, err, `entc/gen: resolving edges: edge T1.groups Through("groups_edge", T2.Type) is allowed only on M2M edges, but got: "O2O"`)
+}
+
+func TestNewGraphThroughDuplicates(t *testing.T) {
+	_, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]},
+		&load.Schema{
+			Name: "User",
+			Edges: []*load.Edge{
+				{Name: "groups", Type: "Group", Through: &struct{ N, T string }{N: "group_edges", T: "T1"}},
+				{Name: "group_edges", Type: "Group"},
+			},
+		},
+		&load.Schema{
+			Name: "Group",
+			Edges: []*load.Edge{
+				{Name: "users", Type: "User", Inverse: true, RefName: "groups", Through: &struct{ N, T string }{N: "user_edges", T: "T1"}},
+			},
+		},
+		&load.Schema{
+			Name: "T1",
+		},
+	)
+	require.EqualError(t, err, `entc/gen: resolving edges: edge User.groups defined with Through("group_edges", T1.Type), but schema User already has an edge named group_edges`)
 }
 
 func TestRelation(t *testing.T) {
@@ -297,51 +347,274 @@ func TestFKColumns(t *testing.T) {
 	}
 }
 
+func TestBlobDualWriteGoType(t *testing.T) {
+	require := require.New(t)
+	doc := &load.Schema{
+		Name: "Doc",
+		Fields: []*load.Field{
+			{
+				Name: "config",
+				Info: &field.TypeInfo{
+					Type:    field.TypeBlob,
+					Ident:   "*Config",
+					PkgPath: "example.com/app",
+					PkgName: "app",
+					RType: &field.RType{
+						Name:    "Config",
+						Ident:   "Config",
+						Kind:    reflect.Struct,
+						PkgPath: "example.com/app",
+					},
+				},
+				ValueScanner:  true,
+				BlobDualWrite: true,
+			},
+		},
+	}
+	g, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, doc)
+	require.NoError(err)
+	require.Len(g.Nodes, 1)
+	f := g.Nodes[0].Fields[0]
+	require.True(f.IsBlob())
+	require.False(f.IsBlobNoColumn())
+	// After graph initialization, the blob field should be TypeBytes but preserve GoType info.
+	require.Equal(field.TypeBytes, f.Type.Type)
+	require.True(f.HasGoType(), "GoType should be preserved for DualWrite blob fields")
+	require.Equal("*Config", f.Type.String(), "Type.String() should return the custom GoType")
+	require.Equal("example.com/app", f.Type.PkgPath)
+	require.NotNil(f.Type.RType)
+	require.Equal("Config", f.Type.RType.Name)
+}
+
+func TestAbortDuplicateFK(t *testing.T) {
+	var (
+		user = &load.Schema{
+			Name: "User",
+			Edges: []*load.Edge{
+				{Name: "pets", Type: "Pet", StorageKey: &edge.StorageKey{Symbols: []string{"owner_id"}}},
+				{Name: "cars", Type: "Car", StorageKey: &edge.StorageKey{Symbols: []string{"owner_id"}}},
+			},
+		}
+		pet = &load.Schema{
+			Name: "Pet",
+			Fields: []*load.Field{
+				{Name: "owner_id", Info: &field.TypeInfo{Type: field.TypeInt}, Nillable: true, Optional: true},
+			},
+			Edges: []*load.Edge{
+				{Name: "owner", Type: "User", RefName: "pets", Inverse: true, Unique: true},
+			},
+		}
+		car = &load.Schema{
+			Name: "Car",
+			Fields: []*load.Field{
+				{Name: "owner_id", Info: &field.TypeInfo{Type: field.TypeInt}, Nillable: true, Optional: true},
+			},
+			Edges: []*load.Edge{
+				{Name: "owner", Type: "User", RefName: "cars", Inverse: true, Unique: true},
+			},
+		}
+	)
+	g, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, user, pet, car)
+	require.NoError(t, err)
+	_, err = g.Tables()
+	require.EqualError(t, err, `duplicate foreign-key symbol "owner_id" found in tables "cars" and "pets"`)
+}
+
+func TestPosition(t *testing.T) {
+	antFn := func(s string) map[string]any {
+		return map[string]any{entsql.Annotation{}.Name(): map[string]string{"schema": s}}
+	}
+	var (
+		user = &load.Schema{
+			Name: "User",
+			Pos:  "user.go:1",
+			Edges: []*load.Edge{
+				{Name: "pets", Type: "Pet"},
+				{Name: "cars", Type: "Car", Through: &struct{ N, T string }{N: "car_edge", T: "CarOwner"}},
+			},
+			Annotations: antFn("one"),
+		}
+		pet = &load.Schema{
+			Name: "Pet",
+			Pos:  "pet.go:10",
+			Edges: []*load.Edge{
+				{Name: "owner", Type: "User", RefName: "pets", Inverse: true},
+			},
+			Annotations: antFn("two"),
+		}
+		petView = &load.Schema{
+			View:        true,
+			Name:        "PetView",
+			Pos:         "pet_view.go:10",
+			Annotations: antFn("two"),
+		}
+		car = &load.Schema{
+			Name: "Car",
+			Pos:  "car.go:100",
+			Edges: []*load.Edge{
+				{Name: "owners", Type: "User", RefName: "cars", Inverse: true},
+			},
+			Annotations: antFn("two"),
+		}
+		carOwner = &load.Schema{
+			Name: "CarOwner",
+			Pos:  "car_owner.go:1000",
+			Fields: []*load.Field{
+				{Name: "user_id", Info: &field.TypeInfo{Type: field.TypeInt}},
+				{Name: "car_id", Info: &field.TypeInfo{Type: field.TypeInt}},
+			},
+			Edges: []*load.Edge{
+				{Name: "owner", Type: "User", Field: "user_id", Unique: true, Required: true},
+				{Name: "car", Type: "User", Field: "car_id", Unique: true, Required: true},
+			},
+			Annotations: antFn("two"),
+		}
+	)
+	g, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, user, pet, petView, car, carOwner)
+	require.NoError(t, err)
+	ts, err := g.Tables()
+	require.NoError(t, err)
+	require.Len(t, ts, 5)
+	require.Equal(t, ts[0].Pos, "user.go:1")
+	require.Equal(t, ts[1].Pos, "pet.go:10")
+	require.Equal(t, ts[2].Pos, "car.go:100")
+	require.Equal(t, ts[3].Pos, "car_owner.go:1000") // edge schema has its own position
+	require.Equal(t, ts[4].Pos, "user.go:1")         // user owns the pet edge -> user position
+	vs, err := g.Views()
+	require.NoError(t, err)
+	require.Len(t, vs, 1)
+	require.Equal(t, vs[0].Pos, "pet_view.go:10")
+}
+
+func TestMultiSchemaAnnotation(t *testing.T) {
+	antFn := func(s string) map[string]any {
+		return map[string]any{entsql.Annotation{}.Name(): map[string]string{"schema": s}}
+	}
+	var (
+		user = &load.Schema{
+			Name: "User",
+			Edges: []*load.Edge{
+				{Name: "pets", Type: "Pet"},
+				{Name: "cars", Type: "Car", Annotations: antFn("two")},
+			},
+			Annotations: antFn("one"),
+		}
+		pet = &load.Schema{
+			Name: "Pet",
+			Edges: []*load.Edge{
+				{Name: "owner", Type: "User", RefName: "pets", Inverse: true},
+			},
+			Annotations: antFn("two"),
+		}
+		car = &load.Schema{
+			Name: "Car",
+			Edges: []*load.Edge{
+				{Name: "owner", Type: "User", RefName: "cars", Inverse: true},
+			},
+			Annotations: antFn("two"),
+		}
+	)
+	g, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, user, pet, car)
+	require.NoError(t, err)
+	ts, err := g.Tables()
+	require.NoError(t, err)
+	require.Len(t, ts, 5)
+	require.Equal(t, "one", ts[0].Schema) // user
+	require.Equal(t, "two", ts[1].Schema) // pet
+	require.Equal(t, "two", ts[2].Schema) // car
+	require.Equal(t, "one", ts[3].Schema) // user<>pets join table user lives in owner schema
+	require.Equal(t, "two", ts[4].Schema) // user<>cars edge has annotation and lives in specified schema
+}
+
+func TestEnsureCorrectFK(t *testing.T) {
+	var (
+		user = &load.Schema{
+			Name: "User",
+			Edges: []*load.Edge{
+				{Name: "pets", Type: "Pet", StorageKey: &edge.StorageKey{Columns: []string{"owner_id"}}},
+			},
+		}
+		pet = &load.Schema{
+			Name: "Pet",
+			Fields: []*load.Field{
+				{Name: "owner_id", Info: &field.TypeInfo{Type: field.TypeInt}, Nillable: true, Optional: true},
+			},
+			Edges: []*load.Edge{
+				{Name: "owner", Type: "User", RefName: "pets", Inverse: true, Unique: true},
+			},
+		}
+	)
+	_, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, user, pet)
+	require.EqualError(t, err, `entc/gen: set "User" foreign-keys: column "owner_id" definition on edge "pets" should be replaced with Field("owner_id") on its reference "owner"`)
+
+	user.Edges[0].StorageKey = nil
+	pet.Edges[0].Field = "owner_id"
+	_, err = NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, user, pet)
+	require.NoError(t, err)
+}
+
 func TestGraph_Gen(t *testing.T) {
 	require := require.New(t)
-	target := filepath.Join(os.TempDir(), "ent")
-	require.NoError(os.MkdirAll(target, os.ModePerm), "creating tmpdir")
-	defer os.RemoveAll(target)
+	target := filepath.Join(t.TempDir(), "ent")
 	external := MustParse(NewTemplate("external").Parse("package external"))
+	skipped := MustParse(NewTemplate("skipped").SkipIf(func(*Graph) bool { return true }).Parse("package external"))
+	schemas := []*load.Schema{
+		{
+			Name: "T1",
+			Fields: []*load.Field{
+				{Name: "age", Info: &field.TypeInfo{Type: field.TypeInt}, Optional: true},
+				{Name: "expired_at", Info: &field.TypeInfo{Type: field.TypeTime}, Nillable: true, Optional: true},
+				{Name: "name", Info: &field.TypeInfo{Type: field.TypeString}},
+			},
+			Edges: []*load.Edge{
+				{Name: "t1", Type: "T1", Unique: true},
+			},
+		},
+		{Name: "T2"},
+		{Name: "T3"},
+	}
 	graph, err := NewGraph(&Config{
 		Package:   "entc/gen",
 		Target:    target,
 		Storage:   drivers[0],
-		Templates: []*Template{external},
+		Templates: []*Template{external, skipped},
 		IDType:    &field.TypeInfo{Type: field.TypeInt},
 		Features:  AllFeatures,
-	}, &load.Schema{
-		Name: "T1",
-		Fields: []*load.Field{
-			{Name: "age", Info: &field.TypeInfo{Type: field.TypeInt}, Optional: true},
-			{Name: "expired_at", Info: &field.TypeInfo{Type: field.TypeTime}, Nillable: true, Optional: true},
-			{Name: "name", Info: &field.TypeInfo{Type: field.TypeString}},
-		},
-		Edges: []*load.Edge{
-			{Name: "t1", Type: "T1", Unique: true},
-		},
-	})
+	}, schemas...)
 	require.NoError(err)
 	require.NotNil(graph)
 	require.NoError(graph.Gen())
-	// ensure graph files were generated.
-	for _, name := range []string{"ent", "client", "config"} {
+	// Ensure globalid feature added annotations.
+	a := IncrementStarts{"t1s": 0, "t2s": 1 << 32, "t3s": 2 << 32}
+	require.Equal(a, graph.Annotations[a.Name()])
+	for i, n := range graph.Nodes {
+		require.Equal(i<<32, *n.EntSQL().IncrementStart)
+	}
+	// Ensure graph files were generated.
+	for _, name := range []string{"ent", "client"} {
 		_, err := os.Stat(fmt.Sprintf("%s/%s.go", target, name))
 		require.NoError(err)
 	}
-	// ensure entity files were generated.
+	// Ensure entity files were generated.
 	for _, format := range []string{"%s", "%s_create", "%s_update", "%s_delete", "%s_query"} {
 		_, err := os.Stat(fmt.Sprintf(fmt.Sprintf("%s/%s.go", target, format), "t1"))
+		require.NoError(err)
+		_, err = os.Stat(fmt.Sprintf(fmt.Sprintf("%s/%s.go", target, format), "t2"))
 		require.NoError(err)
 	}
 	_, err = os.Stat(filepath.Join(target, "external.go"))
 	require.NoError(err)
+	_, err = os.Stat(filepath.Join(target, "skipped.go"))
+	require.True(os.IsNotExist(err))
 
 	// Generated feature templates.
 	_, err = os.Stat(filepath.Join(target, "internal", "schema.go"))
 	require.NoError(err)
 	_, err = os.Stat(filepath.Join(target, "internal", "schemaconfig.go"))
 	require.NoError(err)
+	c, err := os.ReadFile(filepath.Join(target, "internal", "globalid.go"))
+	require.NoError(err)
+	require.Contains(string(c), fmt.Sprintf(`"{\"t1s\":0,\"t2s\":%d,\"t3s\":%d}"`, 1<<32, 2<<32))
 	// Rerun codegen with only one feature-flag.
 	graph.Features = []Feature{FeatureSnapshot}
 	require.NoError(graph.Gen())
@@ -350,11 +623,33 @@ func TestGraph_Gen(t *testing.T) {
 	require.NoError(err)
 	_, err = os.Stat(filepath.Join(target, "internal", "schemaconfig.go"))
 	require.True(os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(target, "internal", "globalid.go"))
+	require.True(os.IsNotExist(err))
 	// Rerun codegen without any feature-flags.
 	graph.Features = nil
 	require.NoError(graph.Gen())
 	_, err = os.Stat(filepath.Join(target, "internal"))
 	require.True(os.IsNotExist(err))
+
+	schemas = schemas[:1]
+	graph, err = NewGraph(&Config{
+		Package:   "entc/gen",
+		Target:    target,
+		Storage:   drivers[0],
+		Templates: []*Template{external, skipped},
+		IDType:    &field.TypeInfo{Type: field.TypeInt},
+		Features:  AllFeatures,
+	}, schemas...)
+	require.NoError(err)
+	require.NotNil(graph)
+	require.NoError(graph.Gen())
+	// Ensure entity files were generated.
+	for _, format := range []string{"%s", "%s_create", "%s_update", "%s_delete", "%s_query"} {
+		_, err := os.Stat(fmt.Sprintf(fmt.Sprintf("%s/%s.go", target, format), "t1"))
+		require.NoError(err)
+		_, err = os.Stat(fmt.Sprintf(fmt.Sprintf("%s/%s.go", target, format), "t2"))
+		require.Error(err)
+	}
 }
 
 func ensureStructTag(name string) Hook {
@@ -438,4 +733,38 @@ func TestDependencyAnnotation_Build(t *testing.T) {
 		require.NoError(t, d.Build())
 		require.Equal(t, tt.field, d.Field)
 	}
+}
+
+func TestEdgeFieldCollation(t *testing.T) {
+	var (
+		user = &load.Schema{
+			Name: "User",
+			Fields: []*load.Field{
+				{Name: "id", Info: &field.TypeInfo{Type: field.TypeString}, Annotations: dict("EntSQL", dict("collation", "utf8mb4_bin"))},
+			},
+		}
+		post = &load.Schema{
+			Name: "Post",
+			Fields: []*load.Field{
+				{Name: "author_id", Info: &field.TypeInfo{Type: field.TypeString}, Annotations: dict("EntSQL", dict("collation", "utf8mb4_bin"))},
+			},
+			Edges: []*load.Edge{
+				{Name: "author", Type: "User", Field: "author_id", Unique: true, Required: true},
+			},
+		}
+	)
+	g, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, user, post)
+	require.NoError(t, err)
+	tables, err := g.Tables()
+	require.NoError(t, err)
+
+	// Find the post table
+	idx := slices.IndexFunc(tables, func(t *schema.Table) bool { return t.Name == "posts" })
+	require.NotEqual(t, -1, idx, "posts table should exist")
+	postTable := tables[idx]
+
+	// Verify author_id column preserves collation from field annotation
+	col, ok := postTable.Column("author_id")
+	require.True(t, ok)
+	require.Equal(t, "utf8mb4_bin", col.Collation)
 }

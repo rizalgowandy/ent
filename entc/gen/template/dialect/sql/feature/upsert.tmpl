@@ -26,14 +26,14 @@ in the LICENSE file in the root directory of this source tree.
 {{/* Template for passing the "OnConflict" options to the sqlgraph.CreateSpec. */}}
 {{- define "dialect/sql/create/spec/upsert" }}
 	{{- if $.FeatureEnabled "sql/upsert" }}
-		_spec.OnConflict = {{ pascal $.Scope.Builder | receiver }}.conflict
+		_spec.OnConflict = {{ $.Scope.Receiver }}.conflict
 	{{- end }}
 {{- end }}
 
 {{/* Template for passing the "OnConflict" options to the sqlgraph.BatchCreateSpec. */}}
 {{- define "dialect/sql/create_bulk/spec/upsert" }}
 	{{- if $.FeatureEnabled "sql/upsert" }}
-		spec.OnConflict = {{ pascal $.Scope.Builder | receiver }}.conflict
+		spec.OnConflict = {{ $.Scope.Receiver }}.conflict
 	{{- end }}
 {{- end }}
 
@@ -47,7 +47,7 @@ in the LICENSE file in the root directory of this source tree.
 {{ define "helper/upsertone" }}
 {{ $pkg := base $.Config.Package }}
 {{ $builder := pascal $.Scope.Builder }}
-{{ $receiver := receiver $builder }}
+{{ $receiver := $.Scope.Receiver }}
 {{ $upsertOne := print $.Name "UpsertOne" }}
 {{ $upsertSet := print $.Name "Upsert" }}
 
@@ -108,7 +108,30 @@ type (
 	}
 )
 
-{{ range $f := $.Fields }}
+{{ range $f := $.UpsertFields }}
+	{{- if $f.IsBlob }}
+	{{ $func := print "Update" $f.StructField }}
+	// {{ $func }} sets the "{{ $f.Name }}" field to the value that was provided on create.
+	func (u *{{ $upsertSet }}) {{ $func }}() *{{ $upsertSet }} {
+		{{- if not $f.IsBlobNoColumn }}
+		u.SetExcluded({{ $.Package }}.{{ $f.Constant }})
+		{{- end }}
+		u.SetExcluded("{{ $f.BlobKeyColumn }}")
+		return u
+	}
+
+	{{ if $f.Optional }}
+		{{ $func := print "Clear" $f.StructField }}
+		// {{ $func }} clears the value of the "{{ $f.Name }}" field.
+		func (u *{{ $upsertSet }}) {{ $func }}() *{{ $upsertSet }} {
+			{{- if not $f.IsBlobNoColumn }}
+			u.SetNull({{ $.Package }}.{{ $f.Constant }})
+			{{- end }}
+			u.SetNull("{{ $f.BlobKeyColumn }}")
+			return u
+		}
+	{{ end }}
+	{{- continue }}{{ end }}
 	{{ $func := print "Set" $f.StructField }}
 	// {{ $func }} sets the "{{ $f.Name }}" field.
 	func (u *{{ $upsertSet }}) {{ $func }}(v {{ $f.Type }}) *{{ $upsertSet }} {
@@ -142,14 +165,15 @@ type (
 	{{ end }}
 {{ end }}
 
+{{ $udfID := false }}{{ if $.HasOneFieldID }}{{ $udfID = $.ID.UserDefined }}{{ end }}
 
-// UpdateNewValues updates the mutable fields using the new values that were set on create{{ if $.ID.UserDefined }} except the ID field{{ end }}.
+// UpdateNewValues updates the mutable fields using the new values that were set on create{{ if $udfID }} except the ID field{{ end }}.
 // Using this option is equivalent to using:
 //
 //	client.{{ $.Name }}.Create().
 //		OnConflict(
 //			sql.ResolveWithNewValues(),
-{{- if $.ID.UserDefined }}
+{{- if $udfID }}
 //			sql.ResolveWith(func(u *sql.UpdateSet) {
 //				u.SetIgnore({{ $.Package }}.{{ $.ID.Constant }})
 //			}),
@@ -159,9 +183,9 @@ type (
 //
 func (u *{{ $upsertOne }}) UpdateNewValues() *{{ $upsertOne }} {
 	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
-	{{- if or $.ID.UserDefined $.ImmutableFields }}
+	{{- if or $udfID $.ImmutableFields }}
 		u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
-			{{- if $.ID.UserDefined }}
+			{{- if $udfID }}
 				if _, exists := u.create.mutation.ID(); exists {
 					s.SetIgnore({{ $.Package }}.{{ $.ID.Constant }})
 				}
@@ -223,33 +247,34 @@ func (u *{{ $upsertOne }}) ExecX(ctx context.Context) {
 	}
 }
 
-// Exec executes the UPSERT query and returns the inserted/updated ID.
-func (u *{{ $upsertOne }}) ID(ctx context.Context) (id {{ $.ID.Type }}, err error) {
-	{{- if and $.ID.UserDefined (not $.ID.Type.Numeric) }}
-		if u.create.driver.Dialect() == dialect.MySQL {
-			// In case of "ON CONFLICT", there is no way to get back non-numeric ID
-			// fields from the database since MySQL does not support the RETURNING clause.
-			return id, errors.New("{{ $pkg }}: {{ $upsertOne }}.ID is not supported by MySQL driver. Use {{ $upsertOne }}.Exec instead")
+{{ if $.HasOneFieldID }}
+	// Exec executes the UPSERT query and returns the inserted/updated ID.
+	func (u *{{ $upsertOne }}) ID(ctx context.Context) (id {{ $.ID.Type }}, err error) {
+		{{- if and $udfID (not $.ID.Type.Numeric) }}
+			if u.create.driver.Dialect() == dialect.MySQL {
+				// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+				// fields from the database since MySQL does not support the RETURNING clause.
+				return id, errors.New("{{ $pkg }}: {{ $upsertOne }}.ID is not supported by MySQL driver. Use {{ $upsertOne }}.Exec instead")
+			}
+		{{- end }}
+		node, err := u.create.Save(ctx)
+		if err != nil {
+			return id, err
 		}
-	{{- end }}
-	node, err := u.create.Save(ctx)
-	if err != nil {
-		return id, err
+		return node.ID, nil
 	}
-	return node.ID, nil
-}
 
-
-// IDX is like ID, but panics if an error occurs.
-func (u *{{ $upsertOne }}) IDX(ctx context.Context) {{ $.ID.Type }} {
-	id, err := u.ID(ctx)
-	if err != nil {
-		panic(err)
+	// IDX is like ID, but panics if an error occurs.
+	func (u *{{ $upsertOne }}) IDX(ctx context.Context) {{ $.ID.Type }} {
+		id, err := u.ID(ctx)
+		if err != nil {
+			panic(err)
+		}
+		return id
 	}
-	return id
-}
+{{ end }}
 
-{{- end }}
+{{ end }}
 
 
 {{ define "dialect/sql/create_bulk/additional/upsert" }}
@@ -262,9 +287,10 @@ func (u *{{ $upsertOne }}) IDX(ctx context.Context) {{ $.ID.Type }} {
 {{ define "helper/upsertbulk" }}
 {{ $pkg := base $.Config.Package }}
 {{ $builder := pascal $.Scope.Builder }}
-{{ $receiver := receiver $builder }}
+{{ $receiver := $.Scope.Receiver }}
 {{ $upsertBulk := print $.Name "UpsertBulk" }}
 {{ $upsertSet := print $.Name "Upsert" }}
+{{ $udfID := false }}{{ if $.HasOneFieldID }}{{ $udfID = $.ID.UserDefined }}{{ end }}
 
 // OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
 // of the `INSERT` statement. For example:
@@ -319,7 +345,7 @@ type {{ $upsertBulk }} struct {
 //	client.{{ $.Name }}.Create().
 //		OnConflict(
 //			sql.ResolveWithNewValues(),
-{{- if $.ID.UserDefined }}
+{{- if $udfID }}
 //			sql.ResolveWith(func(u *sql.UpdateSet) {
 //				u.SetIgnore({{ $.Package }}.{{ $.ID.Constant }})
 //			}),
@@ -329,13 +355,12 @@ type {{ $upsertBulk }} struct {
 //
 func (u *{{ $upsertBulk }}) UpdateNewValues() *{{ $upsertBulk }} {
 	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
-	{{- if or $.ID.UserDefined $.ImmutableFields }}
+	{{- if or $udfID $.ImmutableFields }}
 		u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
 			for _, b := range u.create.builders {
-				{{- if $.ID.UserDefined }}
+				{{- if $udfID }}
 					if _, exists := b.mutation.ID(); exists {
 						s.SetIgnore({{ $.Package }}.{{ $.ID.Constant }})
-						return
 					}
 				{{- end }}
 				{{- range $f := $.ImmutableFields }}
@@ -383,6 +408,9 @@ func (u *{{ $upsertBulk }}) Update(set func(*{{ $upsertSet }})) *{{ $upsertBulk 
 
 // Exec executes the query.
 func (u *{{ $upsertBulk }}) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
 	for i, b := range u.create.builders {
 		if len(b.conflict) != 0 {
 			return fmt.Errorf("{{ $pkg }}: OnConflict was set for builder %d. Set it on the {{ $builder }} instead", i)
@@ -406,7 +434,26 @@ func (u *{{ $upsertBulk }}) ExecX(ctx context.Context) {
 {{ $upsert := $.Scope.Upsert }}
 {{ $upsertSet := $.Scope.UpsertSet }}
 
-{{ range $f := $.Fields }}
+{{ range $f := $.UpsertFields }}
+	{{- if $f.IsBlob }}
+    {{ $func := print "Update" $f.StructField }}
+    // {{ $func }} sets the "{{ $f.Name }}" field to the value that was provided on create.
+    func (u *{{ $upsert }}) {{ $func }}() *{{ $upsert }} {
+        return u.Update(func(s *{{ $upsertSet }}) {
+            s.{{ $func }}()
+        })
+    }
+
+    {{ if $f.Optional }}
+        {{ $func := print "Clear" $f.StructField }}
+        // {{ $func }} clears the value of the "{{ $f.Name }}" field.
+        func (u *{{ $upsert }}) {{ $func }}() *{{ $upsert }} {
+            return u.Update(func(s *{{ $upsertSet }}) {
+                s.{{ $func }}()
+            })
+        }
+    {{ end }}
+	{{- continue }}{{ end }}
     {{ $func := print "Set" $f.StructField }}
     // {{ $func }} sets the "{{ $f.Name }}" field.
 	func (u *{{ $upsert }}) {{ $func }}(v {{ $f.Type }}) *{{ $upsert }} {

@@ -8,46 +8,61 @@ in the LICENSE file in the root directory of this source tree.
 
 {{ define "setter" }}
 {{ $builder := pascal $.Scope.Builder }}
-{{ $receiver := receiver $builder }}
+{{ $receiver := $.Scope.Receiver }}
 {{ $fields := $.Fields }}
 {{ $updater := false }}
+{{ $creator := true }}
 {{- if or (hasSuffix $builder "Update") (hasSuffix $builder "UpdateOne") }}
 	{{ $updater = true }}
+	{{ $creator = false }}
 	{{ $fields = $.MutableFields }}
+{{- else if $.HasCompositeID }}
 {{- else if $.ID.UserDefined }}
 	{{ $fields = append $fields $.ID }}
 {{- end }}
 
 {{ range $f := $fields }}
-	{{ $p := receiver $f.Type.String }}{{ if eq $p $receiver }} {{ $p = "value" }} {{ end }}
+	{{- if $f.IsBlobLazy }}{{ continue }}{{ end }}
+	{{- /* Skip all blob fields on multi-row Update (blob key updates require UpdateOne). */}}
+	{{- if and $f.IsBlob $updater (not (hasSuffix $builder "UpdateOne")) }}{{ continue }}{{ end }}
 	{{ $func := print "Set" $f.StructField }}
 	// {{ $func }} sets the "{{ $f.Name }}" field.
-	func ({{ $receiver }} *{{ $builder }}) {{ $func }}({{ $p }} {{ $f.Type }}) *{{ $builder }} {
+	func ({{ $receiver }} *{{ $builder }}) {{ $func }}(v {{ $f.Type }}) *{{ $builder }} {
 		{{- /* setting numeric type override previous calls to Add. */}}
 		{{- if and $updater $f.SupportsMutationAdd }}
-			{{ $receiver }}.mutation.{{ print "Reset" $f.StructField }}()
+			{{ $receiver }}.mutation.{{ $f.MutationReset }}()
 		{{- end }}
-		{{ $receiver }}.mutation.{{ $func }}({{ $p }})
+		{{ $receiver }}.mutation.{{ $f.MutationSet }}(v)
 		return {{ $receiver }}
 	}
 
-	{{/* Avoid generting nillable setters for nillable types. */}}
-	{{ if and (not $f.Type.Nillable) (or $f.Optional $f.Default) (not (and $updater $f.UpdateDefault)) }}
-		{{ $nillableFunc := print "SetNillable" $f.StructField }}
+	{{/* Avoid generating nillable setters for nillable types. */}}
+	{{ $nillableC := and $creator (or $f.Optional $f.Default) }}
+	{{ $nillableU := and $updater (not $f.UpdateDefault) }}
+	{{ $nillableFunc := print "SetNillable" $f.StructField }}
+	{{ $skipNillable := false }}{{ range $fields }}{{ if and (ne .Name $f.Name) (eq .MutationSet $nillableFunc) }}{{ $skipNillable = true }}{{ break }}{{ end }}{{ end }}
+	{{ if and (not $f.Type.Nillable) (not $skipNillable) (or $nillableC $nillableU) }}
 		// {{ $nillableFunc }} sets the "{{ $f.Name }}" field if the given value is not nil.
-		func ({{ $receiver }} *{{ $builder }}) {{ $nillableFunc }}({{ $p }} *{{ $f.Type }}) *{{ $builder }} {
-			if {{ $p }} != nil {
-				{{ $receiver }}.{{ $func }}(*{{ $p }})
+		func ({{ $receiver }} *{{ $builder }}) {{ $nillableFunc }}(v *{{ $f.Type }}) *{{ $builder }} {
+			if v != nil {
+				{{ $receiver }}.{{ $func }}(*v)
 			}
 			return {{ $receiver }}
 		}
 	{{ end }}
 
 	{{ if and $updater $f.SupportsMutationAdd }}
-		{{ $func := print "Add" $f.StructField }}
-		// {{ $func }} adds {{ $p }} to the "{{ $f.Name }}" field.
-		func ({{ $receiver }} *{{ $builder }}) {{ $func }}({{ $p }} {{ $f.Type }}) *{{ $builder }} {
-			{{ $receiver }}.mutation.{{ $func }}({{ $p }})
+		// {{ $f.MutationAdd }} adds value to the "{{ $f.Name }}" field.
+		func ({{ $receiver }} *{{ $builder }}) {{ $f.MutationAdd }}(v {{ $f.SignedType }}) *{{ $builder }} {
+			{{ $receiver }}.mutation.{{ $f.MutationAdd }}(v)
+			return {{ $receiver }}
+		}
+	{{ end }}
+
+	{{ if and $updater $f.SupportsMutationAppend }}
+		// {{ $f.MutationAppend }} appends value to the "{{ $f.Name }}" field.
+		func ({{ $receiver }} *{{ $builder }}) {{ $f.MutationAppend }}(v {{ $f.Type }}) *{{ $builder }} {
+			{{ $receiver }}.mutation.{{ $f.MutationAppend }}(v)
 			return {{ $receiver }}
 		}
 	{{ end }}
@@ -62,7 +77,36 @@ in the LICENSE file in the root directory of this source tree.
 	{{ end }}
 {{ end }}
 
-{{ range $e := $.Edges }}
+{{- /* Lazy blob setters only on Create and UpdateOne (blob writes require a single-row context). */}}
+{{- $updateOne := hasSuffix $builder "UpdateOne" }}
+{{- if or $creator $updateOne }}
+{{- if hasTemplate (printf "dialect/%s/model/fields" $.Storage) }}
+{{- range $f := $.BlobFields }}
+	{{- if not $f.IsBlobLazy }}{{ continue }}{{ end }}
+	{{ $func := print "Set" $f.StructField }}
+	// {{ $func }} sets the "{{ $f.Name }}" field.
+	func ({{ $receiver }} *{{ $builder }}) {{ $func }}(v io.Reader) *{{ $builder }} {
+		{{ $receiver }}.mutation.Set{{ $f.StructField }}(v)
+		return {{ $receiver }}
+	}
+
+	{{- if and $f.Optional $updateOne }}
+		{{ $clearFunc := print "Clear" $f.StructField }}
+		// {{ $clearFunc }} clears the value of the "{{ $f.Name }}" field.
+		func ({{ $receiver }} *{{ $builder }}) {{ $clearFunc }}() *{{ $builder }} {
+			{{ $receiver }}.mutation.{{ $clearFunc }}()
+			return {{ $receiver }}
+		}
+	{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{ range $e := $.EdgesWithID }}
+	{{ if and $updater $e.Immutable }}
+		{{/* Skip to the next one as immutable edges cannot be updated. */}}
+		{{continue}}
+	{{ end }}
 	{{ $op := "add" }}{{ $idsFunc := $e.MutationAdd }}{{ if $e.Unique }}{{ $op = "set" }}{{ $idsFunc = $e.MutationSet }}{{ end }}
 	{{/* Check if this setter was already defined by the field-setters (e.g. edge-field with the same name). */}}
 	{{ $withSetter := not $e.HasFieldSetter }}
@@ -83,18 +127,15 @@ in the LICENSE file in the root directory of this source tree.
 			return {{ $receiver }}
 		}
 	{{ end }}
-	{{ $p := lower (printf "%.1s" $e.Type.Name) }}
-	{{ if eq $p $receiver }} {{ $p = "v" }} {{ end }}
 	{{ $func := print (pascal $op) $e.StructField }}
 	// {{ $func }} {{ $op }}s the "{{ $e.Name }}" edge{{if not $e.Unique}}s{{ end }} to the {{ $e.Type.Name }} entity.
-	func ({{ $receiver }} *{{ $builder }}) {{ $func }}({{ $p }} {{ if not $e.Unique }}...{{ end }}*{{ $e.Type.Name}}) *{{ $builder }} {
+	func ({{ $receiver }} *{{ $builder }}) {{ $func }}(v {{ if not $e.Unique }}...{{ end }}*{{ $e.Type.Name}}) *{{ $builder }} {
 		{{ if $e.Unique -}}
-			return {{ $receiver }}.{{ $idsFunc }}({{ $p }}.ID)
+			return {{ $receiver }}.{{ $idsFunc }}(v.ID)
 		{{- else -}}
-			ids := make([]{{ $e.Type.ID.Type }}, len({{ $p }}))
-			{{ $i := "i" }}{{ if eq $i $p }}{{ $i = "j" }}{{ end -}}
-			for {{ $i }} := range {{ $p }} {
-				ids[{{ $i }}] = {{ $p }}[{{ $i }}].ID
+			ids := make([]{{ $e.Type.ID.Type }}, len(v))
+			for i := range v {
+				ids[i] = v[i].ID
 			}
 			return {{ $receiver }}.{{ $idsFunc }}(ids...)
 		{{- end }}

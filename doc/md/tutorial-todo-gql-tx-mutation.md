@@ -4,7 +4,7 @@ title: Transactional Mutations
 sidebar_label: Transactional Mutations
 ---
 
-In this section, we continue the [GraphQL example](tutorial-todo-gql.md) by explaining how to set our GraphQL mutations
+In this section, we continue the [GraphQL example](tutorial-todo-gql.mdx) by explaining how to set our GraphQL mutations
 to be transactional. That means, to automatically wrap our GraphQL mutations with a database transaction and either
 commit at the end, or rollback the transaction in case of a GraphQL error.
 
@@ -30,24 +30,66 @@ we follow these steps:
 1\. Edit the `cmd/todo/main.go` and add to the GraphQL server initialization the `entgql.Transactioner` handler as
 follows:
 
-```diff
+```diff title="cmd/todo/main.go"
 srv := handler.NewDefaultServer(todo.NewSchema(client))
 +srv.Use(entgql.Transactioner{TxOpener: client})
 ```
 
 2\. Then, in the GraphQL mutations, use the client from context as follows:
-```diff
-func (mutationResolver) CreateTodo(ctx context.Context, todo TodoInput) (*ent.Todo, error) {
-+	client := ent.FromContext(ctx)
-+	return client.Todo.
--	return r.client.Todo.
-		Create().
-		SetText(todo.Text).
-		SetStatus(todo.Status).
-		SetNillablePriority(todo.Priority). // Set the "priority" field if provided.
-		SetNillableParentID(todo.Parent).   // Set the "parent_id" field if provided.
-		Save(ctx)
+```diff title="todo.resolvers.go"
 }
++func (mutationResolver) CreateTodo(ctx context.Context, input ent.CreateTodoInput) (*ent.Todo, error) {
++	client := ent.FromContext(ctx)
++	return client.Todo.Create().SetInput(input).Save(ctx)
+-func (r *mutationResolver) CreateTodo(ctx context.Context, input ent.CreateTodoInput) (*ent.Todo, error) {
+-	return r.client.Todo.Create().SetInput(input).Save(ctx)
+}
+```
+
+## Isolation Levels
+
+If you'd like to tweak the transaction's isolation level, you can do so by implementing your own `TxOpener`. For example:
+
+```go title="cmd/todo/main.go"
+srv.Use(entgql.Transactioner{
+	TxOpener: entgql.TxOpenerFunc(func(ctx context.Context) (context.Context, driver.Tx, error) {
+		tx, err := client.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+		if err != nil {
+			return nil, nil, err
+		}
+		ctx = ent.NewTxContext(ctx, tx)
+		ctx = ent.NewContext(ctx, tx.Client())
+		return ctx, tx, nil
+	}),
+})
+```
+
+## Skip Operations
+
+By default, `entgql.Transactioner` wraps all mutations within a transaction. However, there are mutations or operations
+that don't require database access or need special handling. In these cases, you can instruct `entgql.Transactioner` to
+skip the transaction by setting a custom `SkipTxFunc` function or using one of the built-in ones.
+
+```go title="cmd/todo/main.go" {4,10,16-18}
+srv.Use(entgql.Transactioner{
+	TxOpener: client,
+	// Skip the given operation names from running under a transaction.
+	SkipTxFunc: entgql.SkipOperations("operation1", "operation2"),
+})
+
+srv.Use(entgql.Transactioner{
+	TxOpener: client,
+	// Skip if the operation has a mutation field with the given names.
+	SkipTxFunc: entgql.SkipIfHasFields("field1", "field2"),
+})
+
+srv.Use(entgql.Transactioner{
+	TxOpener: client,
+	// Custom skip function.
+	SkipTxFunc: func(*ast.OperationDefinition) bool {
+	    // ...
+    },
+})
 ```
 
 ---

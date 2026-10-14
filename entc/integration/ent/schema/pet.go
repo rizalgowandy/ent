@@ -37,6 +37,10 @@ func (Pet) Fields() []ent.Field {
 			Optional(),
 		field.String("nickname").
 			Optional(),
+		field.Bool("trained").
+			Default(false),
+		field.Time("optional_time").
+			Optional(),
 	}
 }
 

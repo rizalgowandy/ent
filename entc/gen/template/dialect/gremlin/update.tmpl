@@ -9,12 +9,17 @@ in the LICENSE file in the root directory of this source tree.
 {{ define "dialect/gremlin/update" }}
 {{ $pkg := $.Scope.Package }}
 {{ $builder := pascal $.Scope.Builder }}
-{{ $receiver := receiver $builder }}
+{{ $receiver := $.Scope.Receiver }}
 {{ $mutation := print $receiver ".mutation" }}
 {{ $one := hasSuffix $builder "One" }}
 {{ $zero := 0 }}{{ if $one }}{{ $zero = "nil" }}{{ end }}
 
 func ({{ $receiver }} *{{ $builder }}) gremlinSave(ctx context.Context) ({{- if $one }}*{{ $.Name }}{{ else }}int{{ end }}, error) {
+	{{- if $.HasUpdateCheckers }}
+		if err := {{ $receiver }}.check(); err != nil {
+			return {{ $zero }}, err
+		}
+	{{- end }}
 	res := &gremlin.Response{}
 	{{- if $one }}
 		id, ok := {{ $mutation }}.{{ $.ID.MutationGet }}()
@@ -31,6 +36,7 @@ func ({{ $receiver }} *{{ $builder }}) gremlinSave(ctx context.Context) ({{- if 
 	if err, ok := isConstantError(res); ok {
 		return {{ $zero }}, err
 	}
+	{{ $mutation }}.done = true
 	{{- if $one }}
 		{{- $r := $.Receiver }}
 		{{ $r }} := &{{ $.Name }}{config: {{ $receiver }}.config}
@@ -57,7 +63,7 @@ func ({{ $receiver }} *{{ $builder }}) gremlin({{ if $one }}id {{ $.ID.Type }}{{
 	{{- /* general update for N vertices */}}
 	{{- else }}
 		v := g.V().HasLabel({{ $.Package }}.Label)
-		for _, p := range {{ $mutation }}.predicates {
+		for _, p := range {{ $mutation }}.Predicates() {
 			p(v)
 		}
 	{{- end }}
@@ -69,6 +75,7 @@ func ({{ $receiver }} *{{ $builder }}) gremlin({{ if $one }}id {{ $.ID.Type }}{{
 		trs []*dsl.Traversal
 	)
 	{{- range $f := $.MutationFields }}
+		{{- if $f.IsBlob }}{{ continue }}{{ end }}
 		{{- if or (not $f.Immutable) $f.UpdateDefault }}
 			if value, ok := {{ $mutation }}.{{ $f.MutationGet }}(); ok {
 				{{- if $f.Unique }}
@@ -95,8 +102,9 @@ func ({{ $receiver }} *{{ $builder }}) gremlin({{ if $one }}id {{ $.ID.Type }}{{
 	{{- end }}
 	{{- /* clear optional fields. */}}
 	{{- with $.HasOptional }}
-		var properties []interface{}
+		var properties []any
 		{{- range $f := $.MutationFields }}
+			{{- if $f.IsBlob }}{{ continue }}{{ end }}
 			{{- if $f.Optional }}
 				if {{ $mutation }}.{{ $f.StructField }}Cleared() {
 					properties = append(properties, {{ $.Package }}.{{ $f.Constant }})
@@ -157,7 +165,7 @@ func ({{ $receiver }} *{{ $builder }}) gremlin({{ if $one }}id {{ $.ID.Type }}{{
 	{{- end }}
 	{{- if $one }}
 		if len({{ $receiver }}.fields) > 0 {
-			fields := make([]interface{}, 0, len({{ $receiver }}.fields)+1)
+			fields := make([]any, 0, len({{ $receiver }}.fields)+1)
 			fields = append(fields, true)
 			for _, f := range {{ $receiver }}.fields {
 				fields = append(fields, f)

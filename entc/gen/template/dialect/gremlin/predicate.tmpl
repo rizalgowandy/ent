@@ -18,7 +18,7 @@ in the LICENSE file in the root directory of this source tree.
 	{{- $storage := $.Scope.Storage -}}
 	func(t *dsl.Traversal) {
 		{{- if $op.Variadic }}
-			v := make([]interface{}, len({{ $arg }}))
+			v := make([]any, len({{ $arg }}))
 			for i := range v {
 				v[i] = {{ $arg }}[i]
 			}
@@ -55,7 +55,7 @@ in the LICENSE file in the root directory of this source tree.
 	{{- $direction := "Out" -}}
 	{{- if $e.IsInverse -}}
 		{{- $direction = "In" -}}
-		{{/* avoid circular dependecies */}}
+		{{/* avoid circular dependencies */}}
 		{{- $label = $e.InverseLabelConstant -}}
 	{{- end -}}
 	func(t *dsl.Traversal) {
@@ -76,7 +76,7 @@ in the LICENSE file in the root directory of this source tree.
 	{{- if $e.IsInverse -}}
 		{{- $direction = "In" -}}
 		{{- $inverse_direction = "Out" -}}
-		{{/* avoid circular dependecies */}}
+		{{/* avoid circular dependencies */}}
 		{{- $label = $e.InverseLabelConstant -}}
 	{{- end -}}
 	func(t *dsl.Traversal) {
@@ -104,7 +104,7 @@ in the LICENSE file in the root directory of this source tree.
 
 {{ define "dialect/gremlin/predicate/and" -}}
 	func(tr *dsl.Traversal) {
-		trs := make([]interface{}, 0, len(predicates))
+		trs := make([]any, 0, len(predicates))
 		for _, p := range predicates {
 			t := __.New()
 			p(t)
@@ -116,7 +116,7 @@ in the LICENSE file in the root directory of this source tree.
 
 {{ define "dialect/gremlin/predicate/or" -}}
 	func(tr *dsl.Traversal) {
-		trs := make([]interface{}, 0, len(predicates))
+		trs := make([]any, 0, len(predicates))
 		for _, p := range predicates {
 			t := __.New()
 			p(t)

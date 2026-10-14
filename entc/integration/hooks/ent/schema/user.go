@@ -6,11 +6,13 @@ package schema
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
-	"entgo.io/ent/entc/integration/hooks/ent/hook"
+	"entgo.io/ent/entc/integration/hooks/ent/user"
 
 	"entgo.io/ent"
+	"entgo.io/ent/entc/integration/hooks/ent/hook"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/mixin"
@@ -34,6 +36,11 @@ func (User) Fields() []ent.Field {
 		field.String("name"),
 		field.Uint("worth").
 			Optional(),
+		field.String("password").
+			Optional().
+			Sensitive(),
+		field.Bool("active").
+			Default(true),
 	}
 }
 
@@ -41,9 +48,26 @@ func (User) Fields() []ent.Field {
 func (User) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.To("cards", Card.Type),
+		edge.To("pets", Pet.Type),
 		edge.To("friends", User.Type),
 		edge.To("best_friend", User.Type).
 			Unique(),
+	}
+}
+
+// Hooks of the User.
+func (User) Hooks() []ent.Hook {
+	return []ent.Hook{
+		hook.If(
+			hook.FixedError(errors.New("password cannot be edited on update-many")),
+			hook.And(
+				hook.HasOp(ent.OpUpdate),
+				hook.Or(
+					hook.HasFields(user.FieldPassword),
+					hook.HasClearedFields(user.FieldPassword),
+				),
+			),
+		),
 	}
 }
 

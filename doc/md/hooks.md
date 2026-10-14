@@ -7,7 +7,7 @@ The `Hooks` option allows adding custom logic before and after operations that m
 
 ## Mutation
 
-A mutation operation is an operation that mutate the database. For example, adding
+A mutation operation is an operation that mutates the database. For example, adding
 a new node to the graph, remove an edge between 2 nodes or delete multiple nodes. 
 
 There are 5 types of mutations:
@@ -17,11 +17,14 @@ There are 5 types of mutations:
 - `DeleteOne` - Delete a node from the graph.
 - `Delete` - Delete all nodes that match a predicate.
 
-Each generated node type has its own type of mutation. For example, all [`User` builders](crud.md#create-an-entity), share
-the same generated `UserMutation` object.
+Each generated node type has its own type of mutation. For example, all [`User` builders](crud.mdx#create-an-entity), share
+the same generated `UserMutation` object. However, all builder types implement the generic <a target="_blank" href="https://pkg.go.dev/entgo.io/ent?tab=doc#Mutation">`ent.Mutation`</a> interface.
 
-However, all builder types implement the generic <a target="_blank" href="https://pkg.go.dev/entgo.io/ent?tab=doc#Mutation">`ent.Mutation`</a> interface.
- 
+:::info Support For Database Triggers
+Unlike database triggers, hooks are executed at the application level, not the database level. If you need to execute
+specific logic on the database level, use database triggers as explained in the [schema migration guide](/docs/migration/triggers).
+:::
+
 ## Hooks
 
 Hooks are functions that get an <a target="_blank" href="https://pkg.go.dev/entgo.io/ent?tab=doc#Mutator">`ent.Mutator`</a> and return a mutator back.
@@ -82,7 +85,7 @@ func main() {
 	})
     client.User.Create().SetName("a8m").SaveX(ctx)
     // Output:
-    // 2020/03/21 10:59:10 Op=Create	Type=Card	Time=46.23µs	ConcreteType=*ent.UserMutation
+    // 2020/03/21 10:59:10 Op=Create	Type=User	Time=46.23µs	ConcreteType=*ent.UserMutation
 }
 ```
 
@@ -184,7 +187,10 @@ func (Card) Hooks() []ent.Hook {
 				if s, ok := m.(interface{ SetName(string) }); ok {
 					s.SetName("Boring")
 				}
-				return next.Mutate(ctx, m)
+				v, err := next.Mutate(ctx, m)
+				// Post mutation action.
+				fmt.Println("new value:", v)
+				return v, err
 			})
 		},
 	}
@@ -206,6 +212,23 @@ or in the package that creates the `ent.Client`.
 import _ "<project>/ent/runtime"
 ```
 :::
+
+#### Import Cycle Error
+
+At the first attempt to set up schema hooks in your project, you may encounter an error like the following:
+```text
+entc/load: parse schema dir: import cycle not allowed: [ent/schema ent/hook ent/ ent/schema]
+To resolve this issue, move the custom types used by the generated code to a separate package: "Type1", "Type2"
+```
+
+The error may occur because the generated code relies on custom types defined in the `ent/schema` package, but this
+package also imports the `ent/hook` package. This indirect import of the `ent` package creates a loop, causing the error
+to occur. To resolve this issue, follow these instructions:
+
+- First, comment out any usage of hooks, privacy policy, or interceptors from the `ent/schema`.
+- Move the custom types defined in the `ent/schema` to a new package, for example, `ent/schema/schematype`.
+- Run `go generate ./...` to update the generated `ent` package to point to the new package. For example, `schema.T` becomes `schematype.T`.
+- Uncomment the hooks, privacy policy, or interceptors, and run `go generate ./...` again. The code generation should now pass without error.
 
 ## Evaluation order
 
@@ -243,11 +266,25 @@ func (SomeMixin) Hooks() []ent.Hook {
     return []ent.Hook{
         // Execute "HookA" only for the UpdateOne and DeleteOne operations.
         hook.On(HookA(), ent.OpUpdateOne|ent.OpDeleteOne),
+
         // Don't execute "HookB" on Create operation.
         hook.Unless(HookB(), ent.OpCreate),
+
         // Execute "HookC" only if the ent.Mutation is changing the "status" field,
         // and clearing the "dirty" field.
         hook.If(HookC(), hook.And(hook.HasFields("status"), hook.HasClearedFields("dirty"))),
+
+        // Disallow changing the "password" field on Update (many) operation.
+        hook.If(
+            hook.FixedError(errors.New("password cannot be edited on update many")),
+            hook.And(
+                hook.HasOp(ent.OpUpdate),
+                hook.Or(
+                	hook.HasFields("password"),
+                	hook.HasClearedFields("password"),
+                ),
+            ),
+        ),
     }
 }
 ```

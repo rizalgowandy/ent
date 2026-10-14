@@ -75,14 +75,14 @@ func (i ID) String() string {
 	return string(i[:])
 }
 
-func (i *ID) Scan(v interface{}) error {
+func (i *ID) Scan(v any) error {
 	switch v := v.(type) {
 	case []byte:
 		copy(i[:], v)
 	case string:
 		copy(i[:], v)
 	default:
-		return fmt.Errorf("unexpcted type: %T", v)
+		return fmt.Errorf("unexpected type: %T", v)
 	}
 	return nil
 }

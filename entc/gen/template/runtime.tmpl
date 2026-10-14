@@ -44,7 +44,7 @@ backwards-compatibility with previous versions of ent.
 
 {{ $hooks := 0 }}
 {{ range $n := $.Nodes }}
-	{{ $numHooks := $n.NumHooks }}{{ if $n.NumPolicy }}{{ $numHooks = add $numHooks 1 }}{{ end }}
+	{{ $numHooks := add $n.NumHooks $n.NumInterceptors }}{{ if $n.NumPolicy }}{{ $numHooks = add $numHooks 1 }}{{ end }}
 	{{ $hooks = add $hooks $numHooks }}
 {{ end }}
 {{ $rtpkg := false }}{{ if hasField $ "Scope" }}{{ $rtpkg = eq $.Scope.Package "runtime" }}{{ end }}
@@ -68,17 +68,21 @@ backwards-compatibility with previous versions of ent.
 {{/* register schema handlers to type packages */}}
 {{ define "runtime/register" }}
 import (
+	"time"
+	"context"
+
 	{{- with $.Config.Schema }}
 		"{{ . }}"
 	{{- end }}
 	{{- range $n := $.Nodes }}
-		"{{ $.Config.Package }}/{{ $n.Package }}"
+		{{ $n.PackageAlias }} "{{ $.Config.Package }}/{{ $n.PackageDir }}"
 		{{- /* Import external packages */}}
 		{{- template "import/types" $n }}
 	{{- end }}
 
 	"entgo.io/ent"
 	"entgo.io/ent/privacy"
+	"entgo.io/ent/schema/field"
 )
 
 
@@ -93,7 +97,7 @@ func init() {
 		{{ $pkg }}Mixin := {{ $schema }}.{{ $n.Name }}{}.Mixin()
 	{{- end }}
 	{{- with $policies := $n.PolicyPositions }}
-		{{- /* policies defined in schema and mixins. */}}
+		{{- /* Policies defined in schema and mixins. */}}
 		{{ $pkg }}.Policy = privacy.NewPolicies({{ range $idx := $n.MixedInPolicies }}{{ $pkg }}Mixin[{{ $idx }}],{{ end }}{{ $schema }}.{{ $n.Name }}{})
 		{{ $pkg }}.Hooks[0] = func(next ent.Mutator) ent.Mutator {
 			return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
@@ -127,22 +131,44 @@ func init() {
 			{{- end }}
 		{{- end }}
 	{{- end }}
-	{{- if or $n.HasDefault $n.HasValidators }}
+	{{- with $inters := $n.InterceptorPositions }}
+		{{- /* Interceptors defined in schema mixins. */}}
+		{{- with $idx := $n.MixedInInterceptors }}
+			{{- range $i := $idx }}
+				{{ print $pkg "MixinInters" $i }} := {{ $pkg }}Mixin[{{ $i }}].Interceptors()
+			{{- end }}
+		{{- end }}
+		{{- /* If there are interceptors defined in the schema. */}}
+		{{- $schemaInters := false }}{{ range $p := $inters }}{{ if not $p.MixedIn }}{{ $schemaInters = true }}{{ end }}{{ end }}
+		{{- if $schemaInters }}
+			{{ print $pkg "Inters" }} := {{ $schema }}.{{ $n.Name }}{}.Interceptors()
+		{{- end }}
+		{{- range $i, $p := $inters }}
+			{{- if $p.MixedIn }}
+				{{ print $pkg ".Interceptors" }}[{{ $i }}] =  {{ print $pkg "MixinInters" $p.MixinIndex }}[{{ $p.Index }}]
+			{{- else }}
+				{{ print $pkg ".Interceptors" }}[{{ $i }}] = {{ print $pkg "Inters" }}[{{ $p.Index }}]
+			{{- end }}
+		{{- end }}
+	{{- end }}
+	{{- if or $n.HasDefault $n.HasUpdateDefault $n.HasValidators $n.HasValueScanner $n.HasBlobFields }}
 		{{- with $idx := $n.MixedInFields }}
 			{{- range $i := $idx }}
 				{{ print $pkg "MixinFields" $i }} := {{ $pkg }}Mixin[{{ $i }}].Fields()
 				_ = {{ $pkg }}MixinFields{{ $i }}
 			{{- end }}
 		{{- end }}
-		{{- $fields := $n.Fields }}{{ if $n.ID.UserDefined }}{{ $fields = append $fields $n.ID }}{{ end }}
+		{{- $fields := $n.Fields }}{{ if $n.HasOneFieldID }}{{ if $n.ID.UserDefined }}{{ $fields = append $fields $n.ID }}{{ end }}{{ end }}
 		{{- with $fields }}
 			{{ $pkg }}Fields := {{ $schema }}.{{ $n.Name }}{}.Fields()
 			_ = {{ $pkg }}Fields
 		{{- end }}
 		{{- range $i, $f := $fields }}
+			{{- if $f.IsBlobLazy }}{{ continue }}{{ end }}
 			{{- $desc := print $pkg "Desc" $f.StructField }}
+			{{- $idscan := and $n.HasOneFieldID (eq $f.Name $n.ID.Name) }}
 			{{- /* enum default values handled near their declarations (in type package). */}}
-			{{- if or (and $f.Default (not $f.IsEnum)) $f.UpdateDefault $f.Validators }}
+			{{- if or (and $f.Default (not $f.IsEnum)) $f.UpdateDefault $f.Validators (and $f.HasValueScanner (or (not $idscan) (eq $n.Storage.Name "sql"))) }}
 				// {{ $desc }} is the schema descriptor for {{ $f.Name }} field.
 				{{- if $f.Position.MixedIn }}
 					{{ $desc }} := {{ print $pkg "MixinFields" $f.Position.MixinIndex }}[{{ $f.Position.Index }}].Descriptor()
@@ -169,14 +195,21 @@ func init() {
 				// {{ $default }} holds the default value on update for the {{ $f.Name }} field.
 				{{ $default }} = {{ $desc }}.UpdateDefault.(func() {{ $f.Type }})
 			{{- end }}
+			{{- if and $f.HasValueScanner (or (not $idscan) (eq $n.Storage.Name "sql")) }}
+				{{- $valuescan := print $pkg ".ValueScanner." $f.StructField }}
+				{{ $valuescan }} = {{ $desc }}.ValueScanner.(field.TypeValueScanner[{{ $f.Type }}])
+			{{- end }}
 			{{- with $f.Validators }}
 				{{- $name := print $pkg "." $f.Validator }}
-				{{- $type :=  printf "func (%s) error" $f.Type.Type }}
+				{{- $type := $f.Type.Type.String }}
+				{{- if $f.IsJSON }}
+					{{- $type = $f.Type.String }}
+				{{- end }}
 				// {{ $name }} is a validator for the "{{ $f.Name }}" field. It is called by the builders before save.
 				{{- if eq $f.Validators 1 }}
-					{{ $name }} = {{ $desc }}.Validators[0].({{ $type }})
+					{{ $name }} = {{ $desc }}.Validators[0].({{ printf "func (%s) error" $type }})
 				{{- else }}
-					{{ $name }} = func() {{ $type }} {
+					{{ $name }} = func() {{ printf "func (%s) error" $type }} {
 						validators := {{ $desc }}.Validators
 						fns := [...]func({{ $f.Type.Type }}) error {
 							{{- range $j, $n := xrange $f.Validators }}
@@ -194,6 +227,22 @@ func init() {
 					}()
 				{{- end }}
 		{{- end }}
+	{{- end }}
+	{{- if hasTemplate (printf "dialect/%s/model/fields" $.Storage) }}
+	{{- range $i, $f := $n.BlobFields }}
+		{{- if $f.HasBlobKey }}
+			{{- $bkName := print $pkg "." $f.BlobKeyName }}
+			{{- $desc := print $pkg "BlobDesc" $f.StructField }}
+			// {{ $desc }} is the schema descriptor for {{ $f.Name }} blob field.
+			{{- if $f.Position.MixedIn }}
+				{{ $desc }} := {{ print $pkg "MixinFields" $f.Position.MixinIndex }}[{{ $f.Position.Index }}].Descriptor()
+			{{- else }}
+				{{ $desc }} := {{ $pkg }}Fields[{{ $f.Position.Index }}].Descriptor()
+			{{- end }}
+			// {{ $bkName }} generates the blob storage key for the {{ $f.Name }} field.
+			{{ $bkName }} = ent.BlobKeyFunc({{ $desc }}.BlobKey)
+		{{- end }}
+	{{- end }}
 	{{- end }}
 {{- end }}
 {{- end }}

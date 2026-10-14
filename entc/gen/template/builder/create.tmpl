@@ -12,16 +12,12 @@ in the LICENSE file in the root directory of this source tree.
 
 {{ template "header" $ }}
 
-{{ template "import" $ }}
-
-import (
-	{{- range $path := $.SiblingImports }}
-		"{{ $path }}"
-	{{- end }}
-)
+{{ with extend $ "Imports" $.SiblingImports }}
+	{{ template "import" . }}
+{{ end }}
 
 {{ $builder := $.CreateName }}
-{{ $receiver := receiver $builder }}
+{{ $receiver := $.CreateReceiver }}
 {{ $mutation := print $receiver ".mutation" }}
 
 // {{ $builder }} is the builder for creating a {{ $.Name }} entity.
@@ -36,16 +32,12 @@ type {{ $builder }} struct {
 	{{- end }}
 }
 
-{{ with extend $ "Builder" $builder }}
+{{ with extend $ "Receiver" $receiver "Builder" $builder }}
 	{{ template "setter" . }}
 {{ end }}
 
 // Save creates the {{ $.Name }} in the database.
 func ({{ $receiver }} *{{ $builder }}) Save(ctx context.Context) (*{{ $.Name }}, error) {
-	var (
-		err error
-		node *{{ $.Name }}
-	)
 	{{- if $.HasDefault }}
 		{{- if $runtimeRequired }}
 			if err := {{ $receiver }}.defaults(); err != nil {
@@ -55,39 +47,7 @@ func ({{ $receiver }} *{{ $builder }}) Save(ctx context.Context) (*{{ $.Name }},
 			{{ $receiver }}.defaults()
 		{{- end }}
 	{{- end }}
-	if len({{ $receiver }}.hooks) == 0 {
-		if err = {{ $receiver }}.check(); err != nil {
-			return nil, err
-		}
-		node, err = {{ $receiver }}.{{ $.Storage }}Save(ctx)
-	} else {
-		var mut Mutator = MutateFunc(func(ctx context.Context, m Mutation) (Value, error) {
-			mutation, ok := m.(*{{ $.MutationName }})
-			if !ok {
-				return nil, fmt.Errorf("unexpected mutation type %T", m)
-			}
-			if err = {{ $receiver }}.check(); err != nil {
-				return nil, err
-			}
-			{{ $mutation }} = mutation
-			if node, err = {{ $receiver }}.{{ $.Storage }}Save(ctx) ; err != nil {
-				return nil, err
-			}
-			mutation.{{ $.ID.BuilderField }} = &node.{{ $.ID.StructField }}
-			mutation.done = true
-			return node, err
-		})
-		for i := len({{ $receiver }}.hooks) - 1; i >= 0; i-- {
-			if {{ $receiver }}.hooks[i] == nil {
-				return nil, fmt.Errorf("{{ $pkg }}: uninitialized hook (forgotten import {{ $pkg }}/runtime?)")
-			}
-			mut = {{ $receiver }}.hooks[i](mut)
-		}
-		if _, err := mut.Mutate(ctx, {{ $mutation }}); err != nil {
-			return nil, err
-		}
-	}
-	return node, err
+	return withHooks(ctx, {{ $receiver }}.{{ $.Storage }}Save, {{ $mutation }}, {{ $receiver }}.hooks)
 }
 
 // SaveX calls Save and panics if Save returns an error.
@@ -112,7 +72,7 @@ func ({{ $receiver }} *{{ $builder }}) ExecX(ctx context.Context) {
 	}
 }
 
-{{- $fields := $.Fields }}{{ if $.ID.UserDefined }}{{ $fields = append $fields $.ID }}{{ end }}
+{{- $fields := $.Fields }}{{ if $.HasOneFieldID }}{{ if $.ID.UserDefined }}{{ $fields = append $fields $.ID }}{{ end }}{{ end }}
 {{ if $.HasDefault }}
 	// defaults sets the default values of the builder before save.
 	func ({{ $receiver }} *{{ $builder }}) defaults() {{ if $runtimeRequired }}error{{ end }}{
@@ -125,7 +85,7 @@ func ({{ $receiver }} *{{ $builder }}) ExecX(ctx context.Context) {
 						}
 					{{- end }}
 					v := {{ $.Package }}.{{ $f.DefaultName }}{{ if $f.DefaultFunc }}(){{ end }}
-					{{ $mutation }}.Set{{ $f.StructField }}(v)
+					{{ $mutation }}.{{ $f.MutationSet }}(v)
 				}
 			{{- end }}
 		{{- end }}
@@ -138,27 +98,37 @@ func ({{ $receiver }} *{{ $builder }}) ExecX(ctx context.Context) {
 // check runs all checks and user-defined validators on the builder.
 func ({{ $receiver }} *{{ $builder }}) check() error {
 	{{- range $f := $fields }}
-		{{- if and (not $f.Optional) (ne $f.Name $.ID.Name) }}
-			if _, ok := {{ $mutation }}.{{ $f.MutationGet }}(); !ok {
-				return &ValidationError{Name: "{{ $f.Name }}", err: errors.New(`{{ $pkg }}: missing required field "{{ $.Name }}.{{ $f.Name }}"`)}
-			}
+		{{- if and $f.IsBlobLazy (not (hasTemplate (printf "dialect/%s/model/fields" $.Storage))) }}{{ continue }}{{ end }}
+		{{- $skip := false }}{{ if $.HasOneFieldID }}{{ if eq $f.Name $.ID.Name }}{{ $skip = true }}{{ end }}{{ end }}
+		{{- if and (not $f.Optional) (not $skip) }}
+			{{- $dialects := $f.RequiredFor }}
+			{{- $n := len $dialects }}
+			{{- if $n }}
+				{{- $partially := ne $n (len $.Config.Storage.Dialects) }}
+				{{- if $partially }}
+					switch {{ $receiver }}.driver.Dialect() {
+					case {{ join $dialects ", " }}:
+				{{- end }}
+					if _, ok := {{ $mutation }}.{{ $f.MutationGet }}(); !ok {
+						return &ValidationError{Name: "{{ $f.Name }}", err: errors.New(`{{ $pkg }}: missing required field "{{ $.Name }}.{{ $f.Name }}"`)}
+					}
+				{{- if $partially }}
+					}
+				{{- end }}
+			{{- end }}
 		{{- end }}
-		{{- with or $f.Validators $f.IsEnum }}
+		{{- $isValidator := and ($f.HasGoType) ($f.Type.Validator) }}
+		{{- with or $f.Validators $f.IsEnum $isValidator }}
 			if v, ok := {{ $mutation }}.{{ $f.MutationGet }}(); ok {
-				{{- $basic := $f.BasicType "v" }}
-				if err := {{ $.Package }}.{{ $f.Validator }}({{ $basic }}); err != nil {
+				if err := {{ if or $f.Validators $f.IsEnum }}{{ $.Package }}.{{ $f.Validator }}({{ $f.BasicType "v" }}){{ else }}v.Validate(){{ end }}; err != nil {
 					return &ValidationError{Name: "{{ $f.Name }}", err: fmt.Errorf(`{{ $pkg }}: validator failed for field "{{ $.Name }}.{{ $f.Name }}": %w`, err)}
 				}
 			}
 		{{- end }}
 	{{- end }}
-	{{- range $e := $.Edges }}
+	{{- range $e := $.EdgesWithID }}
 		{{- if not $e.Optional }}
-			{{- if $e.Unique }}
-				if _, ok := {{ $mutation }}.{{ $e.StructField }}ID(); !ok {
-			{{- else }}
-				if len({{ $mutation }}.{{ $e.StructField }}IDs()) == 0 {
-			{{- end }}
+			if len({{ $mutation }}.{{ $e.StructField }}IDs()) == 0 {
 				return &ValidationError{Name: "{{ $e.Name }}", err: errors.New(`{{ $pkg }}: missing required edge "{{ $.Name }}.{{ $e.Name }}"`)}
 			}
 		{{- end }}
@@ -166,7 +136,7 @@ func ({{ $receiver }} *{{ $builder }}) check() error {
 	return nil
 }
 
-{{ with extend $ "Builder" $builder }}
+{{ with extend $ "Receiver" $receiver "Builder" $builder }}
 	{{ $tmpl := printf "dialect/%s/create" $.Storage }}
 	{{ xtemplate $tmpl . }}
 {{ end }}
@@ -178,12 +148,13 @@ func ({{ $receiver }} *{{ $builder }}) check() error {
 	{{- end }}
 {{- end }}
 
-{{ $bulk := printf "%sCreateBulk" (pascal $.Name) }}
-{{ $receiver = receiver $bulk }}
+{{ $bulk := $.CreateBulkName }}
+{{ $receiver = $.CreateBulReceiver }}
 
 // {{ $bulk }} is the builder for creating many {{ $.Name }} entities in bulk.
 type {{ $bulk }} struct {
 	config
+	err error
 	builders []*{{  $builder }}
 	{{- /* Additional fields to add to the builder. */}}
 	{{- $tmpl = printf "dialect/%s/create_bulk/fields" $.Storage }}
@@ -195,7 +166,7 @@ type {{ $bulk }} struct {
 {{/* If the storage driver supports bulk creation */}}
 {{ $tmpl = printf "dialect/%s/create_bulk" $.Storage }}
 {{ if hasTemplate $tmpl }}
-	{{ with extend $ "Builder" $bulk "Receiver" $receiver }}
+	{{ with extend $ "Receiver" $receiver "Builder" $bulk }}
 		{{ xtemplate $tmpl . }}
 	{{ end }}
 {{ end }}

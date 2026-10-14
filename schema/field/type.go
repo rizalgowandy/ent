@@ -36,6 +36,7 @@ const (
 	TypeUint64
 	TypeFloat32
 	TypeFloat64
+	TypeBlob
 	endTypes
 )
 
@@ -49,7 +50,7 @@ func (t Type) String() string {
 
 // Numeric reports if the given type is a numeric type.
 func (t Type) Numeric() bool {
-	return t >= TypeInt8 && t < endTypes
+	return t >= TypeInt8 && t < TypeBlob
 }
 
 // Float reports if the given type is a float type.
@@ -67,7 +68,7 @@ func (t Type) Valid() bool {
 	return t > TypeInvalid && t < endTypes
 }
 
-// ConstName returns the constant name of a info type.
+// ConstName returns the constant name of an info type.
 // It's used by entc for printing the constant name in templates.
 func (t Type) ConstName() string {
 	switch {
@@ -120,12 +121,17 @@ func (t TypeInfo) ConstName() string {
 
 // ValueScanner indicates if this type implements the ValueScanner interface.
 func (t TypeInfo) ValueScanner() bool {
-	return t.RType.implements(valueScannerType)
+	return t.RType.Implements(valueScannerType)
+}
+
+// Validator indicates if this type implements the Validator interface.
+func (t TypeInfo) Validator() bool {
+	return t.RType.Implements(validatorType)
 }
 
 // Valuer indicates if this type implements the driver.Valuer interface.
 func (t TypeInfo) Valuer() bool {
-	return t.RType.implements(valuerType)
+	return t.RType.Implements(valuerType)
 }
 
 // Comparable reports whether values of this type are comparable.
@@ -147,7 +153,7 @@ var stringerType = reflect.TypeOf((*fmt.Stringer)(nil)).Elem()
 
 // Stringer indicates if this type implements the Stringer interface.
 func (t TypeInfo) Stringer() bool {
-	return t.RType.implements(stringerType)
+	return t.RType.Implements(stringerType)
 }
 
 var (
@@ -161,6 +167,7 @@ var (
 		TypeEnum:    "string",
 		TypeString:  "string",
 		TypeOther:   "other",
+		TypeBlob:    "blob",
 		TypeInt:     "int",
 		TypeInt8:    "int8",
 		TypeInt16:   "int16",
@@ -181,6 +188,7 @@ var (
 		TypeEnum:  "TypeEnum",
 		TypeBytes: "TypeBytes",
 		TypeOther: "TypeOther",
+		TypeBlob:  "TypeBlob",
 	}
 )
 
@@ -215,7 +223,8 @@ func (r *RType) IsPtr() bool {
 	return r != nil && r.Kind == reflect.Ptr
 }
 
-func (r *RType) implements(typ reflect.Type) bool {
+// Implements reports whether the RType ~implements the given interface type.
+func (r *RType) Implements(typ reflect.Type) bool {
 	if r == nil {
 		return false
 	}

@@ -8,11 +8,16 @@ import (
 	"time"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
 	"entgo.io/ent/schema/mixin"
+
+	"ariga.io/atlas/sql/postgres"
+	"github.com/google/uuid"
 )
 
 type Mixin struct {
@@ -45,6 +50,9 @@ func (User) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int("id").
 			StorageKey("oid"),
+		// add a new column.
+		field.Bool("active").
+			Default(true),
 		// changing the type of the field.
 		field.Int("age"),
 		// extending name field to longtext.
@@ -67,10 +75,14 @@ func (User) Fields() []ent.Field {
 		field.String("title").
 			Default("SWE"),
 		// change column name and reference it to the
-		// previous one ("renamed").
+		// previous one using storage-key ("renamed").
 		field.String("new_name").
 			Optional().
 			StorageKey("renamed"),
+		// change column name from "old_token" to "new_token"
+		// and use Atlas diff hook in the migration.
+		field.String("new_token").
+			DefaultFunc(uuid.NewString),
 		// extending the blob size.
 		field.Bytes("blob").
 			Optional().
@@ -78,7 +90,8 @@ func (User) Fields() []ent.Field {
 		// adding enum to the `state` column.
 		field.Enum("state").
 			Optional().
-			Values("logged_in", "logged_out", "online"),
+			Values("logged_in", "logged_out", "online").
+			Default("logged_in"),
 		// convert string to enum.
 		field.Enum("status").
 			Optional().
@@ -86,12 +99,30 @@ func (User) Fields() []ent.Field {
 		// remove the max-length constraint from varchar.
 		field.String("workplace").
 			Optional(),
+		// JSON field with database-default value.
+		field.Strings("roles").
+			Optional().
+			Annotations(entsql.Default(`[]`)),
+		field.String("default_expr").
+			Optional().
+			Annotations(entsql.DefaultExpr("lower('hello')")),
+		field.String("default_exprs").
+			Optional().
+			Annotations(entsql.DefaultExprs(map[string]string{
+				dialect.MySQL:    "TO_BASE64('ent')",
+				dialect.SQLite:   "hex('ent')",
+				dialect.Postgres: "md5('ent')",
+			})),
 		// add a new column with generated values by the database.
 		field.Time("created_at").
 			Default(time.Now).
 			Annotations(&entsql.Annotation{
 				Default: "CURRENT_TIMESTAMP",
 			}),
+		// nullable field was changed to non-nullable without a static
+		// default value, and it requires apply hook to fix this.
+		field.String("drop_optional").
+			DefaultFunc(uuid.NewString),
 		// deleting the `address` column.
 	}
 }
@@ -120,10 +151,35 @@ func (User) Indexes() []ent.Index {
 		// this index on MySQL.
 		index.Fields("description").
 			Annotations(entsql.Prefix(100)),
-		// deleting old indexes (name, address),
+		// Deleting old indexes (name, address),
 		// and defining a new one.
 		index.Fields("phone", "age").
 			Unique(),
+		index.Fields("age").
+			Annotations(entsql.Desc()),
+		// Enable FULLTEXT search on "nickname"
+		// field only in MySQL.
+		index.Fields("nickname").
+			Annotations(
+				entsql.IndexTypes(map[string]string{
+					dialect.MySQL: "FULLTEXT",
+				}),
+			),
+		// For PostgreSQL, we can include in the index non-key columns.
+		index.Fields("workplace").
+			Annotations(
+				entsql.IncludeColumns("nickname"),
+			),
+		// For PostgreSQL and SQLite, users can define partial indexes.
+		index.Fields("phone").
+			Annotations(
+				entsql.IndexWhere(`active AND "phone" <> ''`),
+			),
+		// For PostgreSQL, operator classes can be configured for each field.
+		index.Fields("age", "phone").
+			Annotations(
+				entsql.OpClassColumn("phone", "bpchar_pattern_ops"),
+			),
 	}
 }
 
@@ -131,20 +187,68 @@ type Car struct {
 	ent.Schema
 }
 
+// Annotations of the Car.
+func (Car) Annotations() []schema.Annotation {
+	return []schema.Annotation{
+		entsql.Annotation{Table: "Car"},
+	}
+}
+
+func (Car) Fields() []ent.Field {
+	return []ent.Field{
+		field.String("name").
+			Optional().
+			Unique(),
+	}
+}
+
 func (Car) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.From("owner", User.Type).
 			Ref("car").
-			Unique(),
+			Unique().
+			// Make the M20 edge from nullable to required edge.
+			// Requires column and foreign-key migration.
+			Required(),
 	}
 }
 
 // Group schema.
 type Group struct{ ent.Schema }
 
+// Blog schema.
+type Blog struct{ ent.Schema }
+
+func (Blog) Fields() []ent.Field {
+	return []ent.Field{
+		field.Int("id").
+			SchemaType(map[string]string{
+				dialect.Postgres: postgres.TypeSerial,
+			}),
+		field.Int("oid").
+			SchemaType(map[string]string{
+				dialect.Postgres: postgres.TypeSerial,
+			}),
+	}
+}
+
+func (Blog) Edges() []ent.Edge {
+	return []ent.Edge{
+		edge.To("admins", User.Type),
+	}
+}
+
 // Pet schema.
 type Pet struct {
 	ent.Schema
+}
+
+func (Pet) Fields() []ent.Field {
+	return []ent.Field{
+		field.String("name").
+			Optional().
+			Unique(),
+	}
 }
 
 func (Pet) Edges() []ent.Edge {

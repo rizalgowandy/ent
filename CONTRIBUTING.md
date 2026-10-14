@@ -6,6 +6,7 @@ possible.
 
 - `dialect` - Contains SQL and Gremlin code used by the generated code.
   - `dialect/sql/schema` - Auto migration logic resides there.
+  - `dialect/sql/sqljson` - JSON extension for SQL.
 
 - `schema` - User schema API.
   - `schema/{field, edge, index, mixin}` - provides schema builders API.
@@ -25,16 +26,17 @@ possible.
   In order to test your documentation changes, run `npm start` from the `doc/website` directory, and open [localhost:3000](http://localhost:3000/).
 
 # Run integration tests
-If you touch any file in `entc`, run the following command in `entc`:
+If you touch any file in `entc`, run the following commands in `entc/integration` and 'examples' dirs:
 
 ```
 go generate ./...
+go mod tidy
 ```
 
-Then, in `entc/inegration` run `docker-compose` in order to spin-up all database containers:
+Then, in `entc/integration` run `docker-compose` in order to spin-up all database containers:
 
 ```
-docker-compose -f compose/docker-compose.yaml up -d --scale test=0
+docker-compose -f docker-compose.yaml up -d
 ```
 
 Then, run `go test ./...` to run all integration tests.
@@ -49,20 +51,6 @@ We actively welcome your pull requests.
 4. Ensure the test suite passes.
 5. Make sure your code lints.
 6. If you haven't already, complete the Contributor License Agreement ("CLA").
-
-## Contributor License Agreement ("CLA")
-In order to accept your pull request, we need you to submit a CLA. You only need
-to do this once to work on any of Facebook's open source projects.
-
-Complete your CLA here: <https://code.facebook.com/cla>
-
-## Issues
-We use GitHub issues to track public bugs. Please ensure your description is
-clear and has sufficient instructions to be able to reproduce the issue.
-
-Facebook has a [bounty program](https://www.facebook.com/whitehat/) for the safe
-disclosure of security bugs. In those cases, please go through the process
-outlined on that page and do not file a public issue.
 
 ## License
 By contributing to ent, you agree that your contributions will be licensed

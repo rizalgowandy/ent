@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	// FeaturePrivacy provides a feature-flag for the privacy extension for ent.
+	// FeaturePrivacy provides a feature-flag for the privacy extension.
 	FeaturePrivacy = Feature{
 		Name:        "privacy",
 		Stage:       Alpha,
@@ -21,7 +21,18 @@ var (
 		},
 	}
 
-	// FeatureEntQL provides a feature-flag for the entql extension for ent.
+	// FeatureIntercept provides a feature-flag for the interceptors' extension.
+	FeatureIntercept = Feature{
+		Name:        "intercept",
+		Stage:       Alpha,
+		Default:     false,
+		Description: "Intercept generates a helper package to make working with interceptors easier",
+		cleanup: func(c *Config) error {
+			return os.RemoveAll(filepath.Join(c.Target, "intercept"))
+		},
+	}
+
+	// FeatureEntQL provides a feature-flag for the EntQL extension.
 	FeatureEntQL = Feature{
 		Name:        "entql",
 		Stage:       Experimental,
@@ -30,6 +41,24 @@ var (
 		cleanup: func(c *Config) error {
 			return os.RemoveAll(filepath.Join(c.Target, "entql.go"))
 		},
+	}
+
+	// FeatureNamedEdges provides a feature-flag for eager-loading edges with dynamic names.
+	FeatureNamedEdges = Feature{
+		Name:        "namedges",
+		Stage:       Experimental,
+		Default:     false,
+		Description: "NamedEdges provides an API for eager-loading edges with dynamic names",
+	}
+
+	// FeatureBidiEdgeRefs provides a feature-flag for sql dialect to set two-way
+	// references when loading (unique) edges. Note, users that use the standard
+	// encoding/json.MarshalJSON should detach the circular references before marshaling.
+	FeatureBidiEdgeRefs = Feature{
+		Name:        "bidiedges",
+		Stage:       Experimental,
+		Default:     false,
+		Description: "This features guides Ent to set two-way references when loading (O2M/O2O) edges",
 	}
 
 	// FeatureSnapshot stores a snapshot of ent/schema and auto-solve merge-conflict (issue #852).
@@ -54,7 +83,7 @@ var (
 	// multiple databases.
 	FeatureSchemaConfig = Feature{
 		Name:        "sql/schemaconfig",
-		Stage:       Experimental,
+		Stage:       Stable,
 		Default:     false,
 		Description: "Allows alternate schema names for each ent model. Useful if SQL tables are spread out against multiple databases",
 		GraphTemplates: []GraphTemplate{
@@ -68,7 +97,15 @@ var (
 		},
 	}
 
-	// FeatureLock provides a feature-flag for sql locking extension for ent.
+	// featureMultiSchema indicates that ent/schema is annotated with multiple schemas.
+	// This feature-flag is enabled by default by the storage driver and exists to pass
+	// this info to the templates.
+	featureMultiSchema = Feature{
+		Name:  "sql/multischema",
+		Stage: Beta,
+	}
+
+	// FeatureLock provides a feature-flag for sql locking extension.
 	FeatureLock = Feature{
 		Name:        "sql/lock",
 		Stage:       Experimental,
@@ -84,6 +121,14 @@ var (
 		Description: "Allows users to attach custom modifiers to queries",
 	}
 
+	// FeatureExecQuery provides a feature-flag for exposing the ExecContext/QueryContext methods of the underlying SQL drivers.
+	FeatureExecQuery = Feature{
+		Name:        "sql/execquery",
+		Stage:       Experimental,
+		Default:     false,
+		Description: "Allows users to execute statements using the ExecContext/QueryContext methods of the underlying driver",
+	}
+
 	// FeatureUpsert provides a feature-flag for adding upsert (ON CONFLICT) capabilities to create builders.
 	FeatureUpsert = Feature{
 		Name:        "sql/upsert",
@@ -92,16 +137,46 @@ var (
 		Description: "Allows users to configure the `ON CONFLICT`/`ON DUPLICATE KEY` clause for `INSERT` statements",
 	}
 
+	FeatureVersionedMigration = Feature{
+		Name:        "sql/versioned-migration",
+		Stage:       Experimental,
+		Default:     false,
+		Description: "Allows users to work with versioned migrations / migration files",
+	}
+
+	FeatureGlobalID = Feature{
+		Name:        "sql/globalid",
+		Stage:       Experimental,
+		Default:     false,
+		Description: "Ensures all nodes have a unique global identifier", GraphTemplates: []GraphTemplate{
+			{
+				Name:   "internal/globalid",
+				Format: "internal/globalid.go",
+			},
+		},
+		cleanup: func(c *Config) error {
+			return remove(filepath.Join(c.Target, "internal"), "globalid.go")
+		},
+	}
+
 	// AllFeatures holds a list of all feature-flags.
 	AllFeatures = []Feature{
 		FeaturePrivacy,
+		FeatureIntercept,
 		FeatureEntQL,
+		FeatureNamedEdges,
+		FeatureBidiEdgeRefs,
 		FeatureSnapshot,
 		FeatureSchemaConfig,
 		FeatureLock,
 		FeatureModifier,
+		FeatureExecQuery,
 		FeatureUpsert,
+		FeatureVersionedMigration,
+		FeatureGlobalID,
 	}
+	// allFeatures includes all public and private features.
+	allFeatures = append(AllFeatures, featureMultiSchema)
 )
 
 // FeatureStage describes the stage of the codegen feature.

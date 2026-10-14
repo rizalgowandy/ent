@@ -6,6 +6,8 @@ package schema
 
 import (
 	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/mixin"
@@ -51,13 +53,17 @@ func (User) Fields() []ent.Field {
 			Default("Full-Time"),
 		field.String("SSOCert").
 			Optional(),
+		// Some users store the associations
+		// count as a separate field.
+		field.Int("files_count").
+			Optional(),
 	}
 }
 
 // Edges of the user.
 func (User) Edges() []ent.Edge {
 	return []ent.Edge{
-		edge.To("card", Card.Type).Comment("O2O edge").Unique(),
+		edge.To("card", Card.Type).Comment("Cards associated with this user. O2O edge").Unique(),
 		edge.To("pets", Pet.Type),
 		edge.To("files", File.Type),
 		edge.To("groups", Group.Type),
@@ -66,6 +72,13 @@ func (User) Edges() []ent.Edge {
 		edge.To("team", Pet.Type).Unique(),
 		edge.To("spouse", User.Type).Unique(),
 		edge.To("parent", User.Type).Unique().From("children"),
+	}
+}
+
+// Annotations of the User.
+func (User) Annotations() []schema.Annotation {
+	return []schema.Annotation{
+		entsql.IncrementStart(2 << 32),
 	}
 }
 

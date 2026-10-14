@@ -16,9 +16,11 @@ func main() {
 	log.SetFlags(0)
 	cmd := &cobra.Command{Use: "ent"}
 	cmd.AddCommand(
-		base.InitCmd(),
+		base.NewCmd(),
 		base.DescribeCmd(),
 		base.GenerateCmd(),
+		base.InitCmd(),
+		base.SchemaCmd(),
 	)
-	_ = cmd.Execute()
+	cobra.CheckErr(cmd.Execute())
 }

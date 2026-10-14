@@ -9,7 +9,7 @@ Before we get started, make sure you have the following prerequisites installed 
 
 ## Prerequisites
 
-- [Go](https://golang.org/doc/install)
+- [Go](https://go.dev/doc/install)
 - [Docker](https://docs.docker.com/get-docker) (optional)
 
 After installing these dependencies, create a directory for the project and initialize a Go module:
@@ -29,10 +29,10 @@ go get entgo.io/ent/cmd/ent
 ```
 
 ```console
-go run entgo.io/ent/cmd/ent init Todo
+go run -mod=mod entgo.io/ent/cmd/ent new Todo
 ```
 
-After installing Ent and running `ent init`, your project directory should look like this:
+After installing Ent and running `ent new`, your project directory should look like this:
 
 ```console
 .
@@ -49,7 +49,7 @@ entity schemas.
 
 ## Code Generation
 
-When we ran `ent init Todo` above, a schema named `Todo`  was created in the `todo.go` file under the`todo/ent/schema/` directory:
+When we ran `ent new Todo` above, a schema named `Todo`  was created in the `todo.go` file under the`todo/ent/schema/` directory:
 
 ```go
 package schema
@@ -82,7 +82,7 @@ go generate ./ent
 ## Create a Test Case
 
 Running `go generate ./ent` invoked Ent's automatic code generation tool, which uses the schemas we define in our `schema` package to generate the actual Go code which we will now use to interact with a database. At this stage, you can find under `./ent/client.go`, client code that is capable of  querying and mutating the `Todo` entities. Let's create a
-[testable example](https://blog.golang.org/examples) to use this. We'll use [SQLite](https://github.com/mattn/go-sqlite3)
+[testable example](https://go.dev/blog/examples) to use this. We'll use [SQLite](https://github.com/mattn/go-sqlite3)
 in this test-case for testing Ent.
 
 ```console

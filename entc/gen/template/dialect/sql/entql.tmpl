@@ -12,9 +12,12 @@ in the LICENSE file in the root directory of this source tree.
 {{ template "header" $ }}
 
 import (
+	"context"
+	"time"
+
 	"{{ $.Config.Package }}/predicate"
 	{{- range $n := $.Nodes }}
-		"{{ $.Config.Package }}/{{ $n.Package }}"
+		{{ $n.PackageAlias }} "{{ $.Config.Package }}/{{ $n.PackageDir }}"
 	{{- end }}
 
 	"entgo.io/ent/dialect/sql"
@@ -31,15 +34,28 @@ var schemaGraph = func() *sqlgraph.Schema {
 			NodeSpec: sqlgraph.NodeSpec{
 				Table: {{ $n.Package }}.Table,
 				Columns: {{ $n.Package }}.Columns,
-				ID: &sqlgraph.FieldSpec{
-					Type: field.{{ $n.ID.Type.ConstName }},
-					Column: {{ $n.Package }}.{{ $n.ID.Constant }},
-				},
+				{{- if $n.HasOneFieldID }}
+					ID: &sqlgraph.FieldSpec{
+						Type: field.{{ $n.ID.Type.ConstName }},
+						Column: {{ $n.Package }}.{{ $n.ID.Constant }},
+					},
+				{{- else }}
+					CompositeID: []*sqlgraph.FieldSpec{
+						{{- range $id := $n.EdgeSchema.ID }}
+							{
+								Type: field.{{ $id.Type.ConstName }},
+								Column: {{ $n.Package }}.{{ $id.Constant }},
+							},
+						{{- end }}
+					},
+				{{- end }}
 			},
 			Type: "{{ $n.Name }}",
 			Fields: map[string]*sqlgraph.FieldSpec{
 				{{- range $f := $n.Fields }}
+					{{- if not (or $f.IsBlobNoColumn $f.IsBlobLazy) }}
 					{{ $n.Package }}.{{ $f.Constant }}: {Type: field.{{ $f.Type.ConstName }}, Column: {{ $n.Package }}.{{ $f.Constant }}},
+					{{- end }}
 				{{- end }}
 			},
 		}
@@ -71,7 +87,7 @@ type predicateAdder interface {
 
 {{ range $i, $n := $.Nodes }}
 	{{ $builder := $n.QueryName }}
-	{{ $receiver := receiver $builder }}
+	{{ $receiver := $n.QueryReceiver }}
 	{{ $mutation := $n.MutationName }}
 	{{ $filter := print $n.FilterName }}
 
@@ -82,22 +98,25 @@ type predicateAdder interface {
 
 	// Filter returns a Filter implementation to apply filters on the {{ $builder }} builder.
 	func ({{ $receiver }} *{{ $builder }}) Filter() *{{ $filter }} {
-		return &{{ $filter }}{ {{ $receiver }} }
+		return &{{ $filter }}{config: {{ $receiver }}.config, predicateAdder: {{ $receiver}} }
 	}
 
-	// addPredicate implements the predicateAdder interface.
-	func (m *{{ $mutation }}) addPredicate(pred func(s *sql.Selector)) {
-		m.predicates = append(m.predicates, pred)
-	}
+	{{- if not $n.IsView }}
+			// addPredicate implements the predicateAdder interface.
+			func (m *{{ $mutation }}) addPredicate(pred func(s *sql.Selector)) {
+				m.Where(pred)
+			}
 
-	// Filter returns an entql.Where implementation to apply filters on the {{ $mutation }} builder.
-	func (m *{{ $mutation }}) Filter() *{{ $filter }} {
-		return &{{ $filter }}{m}
-	}
+			// Filter returns an entql.Where implementation to apply filters on the {{ $mutation }} builder.
+			func (m *{{ $mutation }}) Filter() *{{ $filter }} {
+				return &{{ $filter }}{config: m.config, predicateAdder: m}
+			}
+	{{- end }}
 
 	// {{ $filter }} provides a generic filtering capability at runtime for {{ $builder }}.
 	type {{ $filter }} struct {
 		predicateAdder
+		config
 	}
 
 	// Where applies the entql predicate on the query filter.
@@ -109,15 +128,21 @@ type predicateAdder interface {
 		})
 	}
 
-	{{ $type := $n.ID.Type.Type.String }}
-	{{ $iface := print (pascal $type) "P" }}
-	{{ if $n.ID.IsUUID }}{{ $iface = "ValueP" }}{{ end }}
-	// WhereID applies the entql {{ $type }} predicate on the id field.
-	func (f *{{ $filter }}) WhereID(p entql.{{ $iface }}) {
-		f.Where(p.Field({{ $n.Package }}.{{ $n.ID.Constant }}))
-	}
+	{{- if $n.HasOneFieldID }}
+		{{ $type := $n.ID.Type.Type.String }}
+		{{ $iface := print (pascal $type) "P" }}
+		{{- if $n.ID.IsTime }}{{ $iface = "TimeP" }}
+		{{- else if or $n.ID.IsBytes $n.ID.IsJSON }}{{ $iface = "BytesP" }}
+		{{- else if $n.ID.IsUUID }}{{ $iface = "ValueP" }}
+		{{- end }}
+		// WhereID applies the entql {{ $type }} predicate on the id field.
+		func (f *{{ $filter }}) WhereID(p entql.{{ $iface }}) {
+			f.Where(p.Field({{ $n.Package }}.{{ $n.ID.Constant }}))
+		}
+	{{- end }}
 
 	{{ range $f := $n.Fields }}
+	{{- if or $f.IsBlobNoColumn $f.IsBlobLazy }}{{ continue }}{{ end }}
 		{{ $type := $f.Type.Type.String }}
 		{{ $iface := print (pascal $type) "P" }}
 		{{- if $f.IsTime }}{{ $iface = "TimeP" }}

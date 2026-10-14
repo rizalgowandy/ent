@@ -21,7 +21,7 @@ can generate both server and client boilerplate code for more than 20 languages,
 The first step is to add the `elk` package to your project:
 
 ```shell
-go install github.com/masseelch/elk
+go get github.com/masseelch/elk@latest
 ```
 
 `elk` uses the Ent [Extension API](https://entgo.io/docs/extensions) to integrate with Ent’s code-generation. This
@@ -75,7 +75,7 @@ over to the [Setup Tutorial](https://entgo.io/docs/tutorial-setup/).
 The first step on our way to the OAS file is to create an Ent schema graph:
 
 ```shell
-go run -mod=mod entgo.io/ent/cmd/ent init Fridge Compartment Item
+go run -mod=mod entgo.io/ent/cmd/ent new Fridge Compartment Item
 ```
 
 To demonstrate `elk`'s OAS generation capabilities, we will build together an example application. Suppose I have
@@ -375,12 +375,13 @@ in any supported language and forget about writing a RESTful client ever _ever_ 
 In this post we introduced a new feature of `elk` - automatic OpenAPI Specification generation. This feature connects
 between Ent's code-generation capabilities and OpenAPI/Swagger's rich tooling ecosystem. 
 
-Have questions? Need help with getting started? Feel free to [join our Slack channel](https://entgo.io/docs/slack/).
+Have questions? Need help with getting started? Feel free to join our [Discord server](https://discord.gg/qZmPgTE6RX) or [Slack channel](https://entgo.io/docs/slack/).
 
 :::note For more Ent news and updates:
 
-- Subscribe to our [Newsletter](https://www.getrevue.co/profile/ent)
+- Subscribe to our [Newsletter](https://entgo.substack.com/)
 - Follow us on [Twitter](https://twitter.com/entgo_io)
 - Join us on #ent on the [Gophers Slack](https://entgo.io/docs/slack)
+- Join us on the [Ent Discord Server](https://discord.gg/qZmPgTE6RX)
 
 :::

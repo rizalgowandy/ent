@@ -7,20 +7,27 @@ package field_test
 import (
 	"database/sql"
 	"database/sql/driver"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"reflect"
 	"regexp"
+	"strconv"
 	"testing"
 	"time"
 
+	"entgo.io/ent"
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/schema/field"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInt(t *testing.T) {
@@ -85,7 +92,7 @@ func TestInt(t *testing.T) {
 	assert.True(t, fd.Info.ValueScanner())
 
 	fd = field.Int("count").GoType(false).Descriptor()
-	assert.EqualError(t, fd.Err, `GoType must be a "int" type or ValueScanner`)
+	assert.EqualError(t, fd.Err, `GoType must be a "int" type, ValueScanner or provide an external ValueScanner`)
 	fd = field.Int("count").GoType(struct{}{}).Descriptor()
 	assert.Error(t, fd.Err)
 	fd = field.Int("count").GoType(new(Count)).Descriptor()
@@ -150,6 +157,30 @@ func TestFloat(t *testing.T) {
 	assert.Error(t, fd.Err)
 }
 
+func TestFloat_DefaultFunc(t *testing.T) {
+	type CustomFloat float64
+
+	f1 := func() CustomFloat { return 1.2 }
+	fd := field.Float("weight").DefaultFunc(f1).GoType(CustomFloat(0.)).Descriptor()
+	assert.NoError(t, fd.Err)
+
+	fd = field.Float("weight").DefaultFunc(f1).Descriptor()
+	assert.Error(t, fd.Err, "`var _ float = f1()` should fail")
+
+	f2 := func() float64 { return 1000 }
+	fd = field.Float("weight").GoType(CustomFloat(0)).DefaultFunc(f2).Descriptor()
+	assert.Error(t, fd.Err, "`var _ CustomFloat = f2()` should fail")
+
+	fd = field.Float("weight").DefaultFunc(f2).UpdateDefault(f2).Descriptor()
+	assert.NoError(t, fd.Err)
+	assert.NotNil(t, fd.Default)
+	assert.NotNil(t, fd.UpdateDefault)
+
+	f3 := func() float64 { return 1.2 }
+	fd = field.Float("weight").DefaultFunc(f3).Descriptor()
+	assert.NoError(t, fd.Err)
+}
+
 func TestBool(t *testing.T) {
 	fd := field.Bool("active").Default(true).Comment("comment").Immutable().Descriptor()
 	assert.Equal(t, "active", fd.Name)
@@ -188,7 +219,7 @@ type Pair struct {
 	K, V []byte
 }
 
-func (*Pair) Scan(interface{}) error      { return nil }
+func (*Pair) Scan(any) error              { return nil }
 func (Pair) Value() (driver.Value, error) { return nil, nil }
 
 func TestBytes(t *testing.T) {
@@ -230,7 +261,7 @@ func TestBytes(t *testing.T) {
 	assert.Equal(t, "uuid.UUID", fd.Info.Ident)
 	assert.Equal(t, "github.com/google/uuid", fd.Info.PkgPath)
 	assert.Equal(t, "uuid.UUID", fd.Info.String())
-	assert.True(t, fd.Info.Nillable)
+	assert.False(t, fd.Info.Nillable)
 	assert.True(t, fd.Info.ValueScanner())
 	assert.NotEmpty(t, fd.Default.(func() uuid.UUID)())
 
@@ -278,6 +309,61 @@ func TestBytes_DefaultFunc(t *testing.T) {
 	f4 := func() net.IPMask { return net.IPMask("ffff:ff80::") }
 	fd = field.Bytes("ip").GoType(net.IP("127.0.0.1")).DefaultFunc(f4).Descriptor()
 	assert.Error(t, fd.Err, "`var _ net.IP = f4()` should fail")
+
+	fd = field.Bytes("ip").GoType(net.IP("127.0.0.1")).DefaultFunc(net.IP("127.0.0.1")).Descriptor()
+	assert.EqualError(t, fd.Err, `field.Bytes("ip").DefaultFunc expects func but got slice`)
+}
+
+type nullBytes []byte
+
+func (b *nullBytes) Scan(v any) error {
+	if v == nil {
+		return nil
+	}
+	switch v := v.(type) {
+	case []byte:
+		*b = v
+		return nil
+	case string:
+		*b = []byte(v)
+		return nil
+	default:
+		return errors.New("unexpected type")
+	}
+}
+
+func (b nullBytes) Value() (driver.Value, error) { return b, nil }
+
+func TestBytes_ValueScanner(t *testing.T) {
+	fd := field.Bytes("dir").
+		ValueScanner(field.ValueScannerFunc[[]byte, *nullBytes]{
+			V: func(s []byte) (driver.Value, error) {
+				return []byte(hex.EncodeToString(s)), nil
+			},
+			S: func(ns *nullBytes) ([]byte, error) {
+				if ns == nil {
+					return nil, nil
+				}
+				b, err := hex.DecodeString(string(*ns))
+				if err != nil {
+					return nil, err
+				}
+				return b, nil
+			},
+		}).Descriptor()
+	require.NoError(t, fd.Err)
+	require.NotNil(t, fd.ValueScanner)
+	_, ok := fd.ValueScanner.(field.ValueScannerFunc[[]byte, *nullBytes])
+	require.True(t, ok)
+
+	fd = field.Bytes("url").
+		GoType(&url.URL{}).
+		ValueScanner(field.BinaryValueScanner[*url.URL]{}).
+		Descriptor()
+	require.NoError(t, fd.Err)
+	require.NotNil(t, fd.ValueScanner)
+	_, ok = fd.ValueScanner.(field.TypeValueScanner[*url.URL])
+	require.True(t, ok)
 }
 
 func TestString_DefaultFunc(t *testing.T) {
@@ -300,11 +386,90 @@ func TestString_DefaultFunc(t *testing.T) {
 	f4 := func() S { return "" }
 	fd = field.String("str").GoType(http.Dir("/tmp")).DefaultFunc(f4).Descriptor()
 	assert.Error(t, fd.Err, "`var _ http.Dir = f4()` should fail")
+
+	fd = field.String("str").GoType(http.Dir("/tmp")).DefaultFunc("/tmp").Descriptor()
+	assert.EqualError(t, fd.Err, `field.String("str").DefaultFunc expects func but got string`)
+}
+
+func TestString_ValueScanner(t *testing.T) {
+	fd := field.String("dir").
+		ValueScanner(field.ValueScannerFunc[string, *sql.NullString]{
+			V: func(s string) (driver.Value, error) {
+				return base64.StdEncoding.EncodeToString([]byte(s)), nil
+			},
+			S: func(ns *sql.NullString) (string, error) {
+				if !ns.Valid {
+					return "", nil
+				}
+				b, err := base64.StdEncoding.DecodeString(ns.String)
+				if err != nil {
+					return "", err
+				}
+				return string(b), nil
+			},
+		}).Descriptor()
+	require.NoError(t, fd.Err)
+	require.NotNil(t, fd.ValueScanner)
+	_, ok := fd.ValueScanner.(field.TypeValueScanner[string])
+	require.True(t, ok)
+
+	fd = field.String("url").
+		GoType(&url.URL{}).
+		ValueScanner(field.BinaryValueScanner[*url.URL]{}).
+		Descriptor()
+	require.NoError(t, fd.Err)
+	require.NotNil(t, fd.ValueScanner)
+	_, ok = fd.ValueScanner.(field.TypeValueScanner[*url.URL])
+	require.True(t, ok)
+}
+
+func TestSlices(t *testing.T) {
+	fd := field.Strings("strings").
+		Default([]string{}).
+		Comment("comment").
+		Validate(func(xs []string) error {
+			return nil
+		}).
+		Descriptor()
+	assert.Equal(t, "strings", fd.Name)
+	assert.Equal(t, field.TypeJSON, fd.Info.Type)
+	assert.NotNil(t, fd.Default)
+	assert.Equal(t, []string{}, fd.Default)
+	assert.Equal(t, "comment", fd.Comment)
+	assert.Len(t, fd.Validators, 1)
+
+	fd = field.Ints("ints").
+		Default([]int{}).
+		Comment("comment").
+		Validate(func(xs []int) error {
+			return nil
+		}).
+		Descriptor()
+	assert.Equal(t, "ints", fd.Name)
+	assert.Equal(t, field.TypeJSON, fd.Info.Type)
+	assert.NotNil(t, fd.Default)
+	assert.Equal(t, []int{}, fd.Default)
+	assert.Equal(t, "comment", fd.Comment)
+	assert.Len(t, fd.Validators, 1)
+
+	fd = field.Floats("floats").
+		Default([]float64{}).
+		Comment("comment").
+		Validate(func(xs []float64) error {
+			return nil
+		}).
+		Descriptor()
+	assert.Equal(t, "floats", fd.Name)
+	assert.Equal(t, field.TypeJSON, fd.Info.Type)
+	assert.NotNil(t, fd.Default)
+	assert.Equal(t, []float64{}, fd.Default)
+	assert.Equal(t, "comment", fd.Comment)
+	assert.Len(t, fd.Validators, 1)
 }
 
 type VString string
 
-func (s *VString) Scan(interface{}) error {
+func (s *VString) Scan(any) error {
 	return nil
 }
 
@@ -374,6 +539,7 @@ func TestString(t *testing.T) {
 	assert.Equal(t, "*field_test.tURL", fd.Info.String())
 	assert.True(t, fd.Info.ValueScanner())
 	assert.True(t, fd.Info.Stringer())
+	assert.Equal(t, "field_test", fd.Info.PkgName)
 
 	fd = field.String("name").GoType(1).Descriptor()
 	assert.Error(t, fd.Err)
@@ -407,7 +573,7 @@ func TestTime(t *testing.T) {
 	assert.Equal(t, now, fd.UpdateDefault.(func() time.Time)())
 
 	type Time time.Time
-	fd = field.Time("deleted_at").GoType(Time{}).Descriptor()
+	fd = field.Time("deleted_at").GoType(Time{}).Default(func() Time { return Time{} }).Descriptor()
 	assert.NoError(t, fd.Err)
 	assert.Equal(t, "field_test.Time", fd.Info.Ident)
 	assert.Equal(t, "entgo.io/ent/schema/field_test", fd.Info.PkgPath)
@@ -422,7 +588,10 @@ func TestTime(t *testing.T) {
 	assert.Equal(t, "*sql.NullTime", fd.Info.String())
 	assert.True(t, fd.Info.Nillable)
 	assert.True(t, fd.Info.ValueScanner())
+	assert.Equal(t, "sql", fd.Info.PkgName)
 
+	fd = field.Time("deleted_at").GoType(Time{}).Default(time.Now).Descriptor()
+	assert.Error(t, fd.Err)
 	fd = field.Time("active").GoType(1).Descriptor()
 	assert.Error(t, fd.Err)
 	fd = field.Time("active").GoType(struct{}{}).Descriptor()
@@ -444,6 +613,7 @@ func TestJSON(t *testing.T) {
 	assert.Equal(t, "comment", fd.Comment)
 	assert.True(t, fd.Info.Nillable)
 	assert.False(t, fd.Info.RType.IsPtr())
+	assert.Empty(t, fd.Info.PkgName)
 
 	type T struct{ S string }
 	fd = field.JSON("name", &T{}).
@@ -468,9 +638,11 @@ func TestJSON(t *testing.T) {
 	fd = field.Strings("strings").
 		Optional().
 		Default([]string{"a", "b"}).
+		Sensitive().
 		Descriptor()
 	assert.NoError(t, fd.Err)
 	assert.True(t, fd.Optional)
+	assert.True(t, fd.Sensitive)
 	assert.Empty(t, fd.Info.PkgPath)
 	assert.Equal(t, "strings", fd.Name)
 	assert.Equal(t, []string{"a", "b"}, fd.Default)
@@ -481,27 +653,44 @@ func TestJSON(t *testing.T) {
 		Default([]http.Dir{"a", "b"}).
 		Descriptor()
 	assert.NoError(t, fd.Err)
+	assert.Equal(t, "http", fd.Info.PkgName)
+
 	fd = field.JSON("dirs", []http.Dir{}).
 		Default(func() []http.Dir {
 			return []http.Dir{"/tmp"}
 		}).
 		Descriptor()
 	assert.NoError(t, fd.Err)
+
 	fd = field.JSON("dirs", []http.Dir{}).
 		Default([]string{"a", "b"}).
 		Descriptor()
 	assert.Error(t, fd.Err)
 
+	fd = field.Any("unknown").
+		Descriptor()
+	assert.NoError(t, fd.Err)
+	assert.Equal(t, field.TypeJSON, fd.Info.Type)
+	assert.Equal(t, "unknown", fd.Name)
+	assert.Equal(t, "any", fd.Info.String())
+
 	fd = field.JSON("values", &url.Values{}).Descriptor()
 	assert.Equal(t, "net/url", fd.Info.PkgPath)
+	assert.Equal(t, "url", fd.Info.PkgName)
 	fd = field.JSON("values", []url.Values{}).Descriptor()
 	assert.Equal(t, "net/url", fd.Info.PkgPath)
+	assert.Equal(t, "url", fd.Info.PkgName)
 	fd = field.JSON("values", []*url.Values{}).Descriptor()
 	assert.Equal(t, "net/url", fd.Info.PkgPath)
+	assert.Equal(t, "url", fd.Info.PkgName)
 	fd = field.JSON("values", map[string]url.Values{}).Descriptor()
 	assert.Equal(t, "net/url", fd.Info.PkgPath)
+	assert.Equal(t, "url", fd.Info.PkgName)
 	fd = field.JSON("values", map[string]*url.Values{}).Descriptor()
 	assert.Equal(t, "net/url", fd.Info.PkgPath)
+	assert.Equal(t, "url", fd.Info.PkgName)
+	fd = field.JSON("addr", net.Addr(nil)).Descriptor()
+	assert.EqualError(t, fd.Err, "expect a Go value as JSON type but got nil")
 }
 
 func TestField_Tag(t *testing.T) {
@@ -538,7 +727,7 @@ func (i RoleInt) Value() (driver.Value, error) {
 	return i.String(), nil
 }
 
-func (i *RoleInt) Scan(val interface{}) error {
+func (i *RoleInt) Scan(val any) error {
 	switch v := val.(type) {
 	case string:
 		switch v {
@@ -634,7 +823,7 @@ func TestField_UUID(t *testing.T) {
 type custom struct {
 }
 
-func (c *custom) Scan(_ interface{}) (err error) {
+func (c *custom) Scan(_ any) (err error) {
 	return nil
 }
 
@@ -678,12 +867,83 @@ func TestField_Other(t *testing.T) {
 	assert.Error(t, fd.Err, "invalid default value")
 }
 
+type UserRole string
+
+const (
+	Admin   UserRole = "ADMIN"
+	User    UserRole = "USER"
+	Unknown UserRole = "UNKNOWN"
+)
+
+func (UserRole) Values() (roles []string) {
+	for _, r := range []UserRole{Admin, User, Unknown} {
+		roles = append(roles, string(r))
+	}
+	return
+}
+
+func (e UserRole) String() string {
+	return string(e)
+}
+
+// MarshalGQL implements graphql.Marshaler interface.
+func (e UserRole) MarshalGQL(w io.Writer) {
+	_, _ = io.WriteString(w, strconv.Quote(e.String()))
+}
+
+// UnmarshalGQL implements graphql.Unmarshaler interface.
+func (e *UserRole) UnmarshalGQL(val any) error {
+	str, ok := val.(string)
+	if !ok {
+		return fmt.Errorf("enum %T must be a string", val)
+	}
+	*e = UserRole(str)
+	switch *e {
+	case Admin, User, Unknown:
+		return nil
+	default:
+		return fmt.Errorf("%s is not a valid Role", str)
+	}
+}
+
+type Scalar struct{}
+
+func (Scalar) MarshalGQL(io.Writer)         {}
+func (*Scalar) UnmarshalGQL(any) error      { return nil }
+func (Scalar) Value() (driver.Value, error) { return nil, nil }
+
+func TestRType_Implements(t *testing.T) {
+	type (
+		marshaler   interface{ MarshalGQL(w io.Writer) }
+		unmarshaler interface{ UnmarshalGQL(v any) error }
+		codec       interface {
+			marshaler
+			unmarshaler
+		}
+	)
+	var (
+		codecType     = reflect.TypeOf((*codec)(nil)).Elem()
+		marshalType   = reflect.TypeOf((*marshaler)(nil)).Elem()
+		unmarshalType = reflect.TypeOf((*unmarshaler)(nil)).Elem()
+	)
+	for _, f := range []ent.Field{
+		field.Enum("role").GoType(Admin),
+		field.Other("scalar", &Scalar{}),
+		field.Other("scalar", Scalar{}),
+	} {
+		fd := f.Descriptor()
+		assert.True(t, fd.Info.RType.Implements(codecType))
+		assert.True(t, fd.Info.RType.Implements(marshalType))
+		assert.True(t, fd.Info.RType.Implements(unmarshalType))
+	}
+}
+
 func TestTypeString(t *testing.T) {
 	typ := field.TypeBool
 	assert.Equal(t, "bool", typ.String())
 	typ = field.TypeInvalid
 	assert.Equal(t, "invalid", typ.String())
-	typ = 21
+	typ = 22
 	assert.Equal(t, "invalid", typ.String())
 }
 
@@ -699,7 +959,7 @@ func TestTypeValid(t *testing.T) {
 	assert.True(t, typ.Valid())
 	typ = 0
 	assert.False(t, typ.Valid())
-	typ = 21
+	typ = 22
 	assert.False(t, typ.Valid())
 }
 
@@ -712,6 +972,46 @@ func TestTypeConstName(t *testing.T) {
 	assert.Equal(t, "TypeInt64", typ.ConstName())
 	typ = field.TypeOther
 	assert.Equal(t, "TypeOther", typ.ConstName())
-	typ = 21
+	typ = 22
 	assert.Equal(t, "invalid", typ.ConstName())
+}
+
+func TestString_MinRuneLen(t *testing.T) {
+	fd := field.String("name").MinRuneLen(5).Descriptor()
+	assert.Len(t, fd.Validators, 1)
+
+	err := fd.Validators[0].(func(string) error)("hello")
+	assert.NoError(t, err)
+
+	err = fd.Validators[0].(func(string) error)("hi")
+	assert.EqualError(t, err, "value is less than the required rune length")
+
+	err = fd.Validators[0].(func(string) error)("你好")
+	assert.EqualError(t, err, "value is less than the required rune length")
+
+	err = fd.Validators[0].(func(string) error)("你好世界！")
+	assert.NoError(t, err)
+
+	err = fd.Validators[0].(func(string) error)("")
+	assert.Error(t, err)
+}
+
+func TestString_MaxRuneLen(t *testing.T) {
+	fd := field.String("name").MaxRuneLen(5).Descriptor()
+	assert.Len(t, fd.Validators, 1)
+
+	err := fd.Validators[0].(func(string) error)("hello")
+	assert.NoError(t, err)
+
+	err = fd.Validators[0].(func(string) error)("hello world")
+	assert.EqualError(t, err, "value is greater than the required rune length")
+
+	err = fd.Validators[0].(func(string) error)("你好世界你好")
+	assert.EqualError(t, err, "value is greater than the required rune length")
+
+	err = fd.Validators[0].(func(string) error)("你好世界！")
+	assert.NoError(t, err)
+
+	err = fd.Validators[0].(func(string) error)("")
+	assert.NoError(t, err)
 }

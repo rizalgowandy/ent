@@ -46,7 +46,6 @@ type (
 //
 //	g.AddE("pets", spec, "user", "pet")
 //	g.AddE("friends", spec, "user", "user")
-//
 func (g *Schema) AddE(name string, spec *EdgeSpec, from, to string) error {
 	var fromT, toT *Node
 	for i := range g.Nodes {
@@ -244,9 +243,31 @@ func (e *state) evalBinary(expr *entql.BinaryExpr) *sql.Predicate {
 func (e *state) evalEdge(name string, exprs ...entql.Expr) *sql.Predicate {
 	edge, ok := e.context.Edges[name]
 	expect(ok, "edge %q was not found for node %q", name, e.context.Type)
+	var fromC, toC string
+	switch {
+	case edge.To.ID != nil:
+		toC = edge.To.ID.Column
+	// Edge-owner points to its edge schema.
+	case edge.To.CompositeID != nil && !edge.Spec.Inverse:
+		toC = edge.To.CompositeID[0].Column
+	// Edge-backref points to its edge schema.
+	case edge.To.CompositeID != nil && edge.Spec.Inverse:
+		toC = edge.To.CompositeID[1].Column
+	default:
+		panic(evalError{fmt.Sprintf("expect id definition for edge %q", name)})
+	}
+	switch {
+	case e.context.ID != nil:
+		fromC = e.context.ID.Column
+	case e.context.CompositeID != nil && (edge.Spec.Rel == M2O || (edge.Spec.Rel == O2O && edge.Spec.Inverse)):
+		// An edge-schema with a composite id can query
+		// only edges that it owns (holds the foreign-key).
+	default:
+		panic(evalError{fmt.Sprintf("unexpected edge-query from an edge-schema %q", e.context.Type)})
+	}
 	step := NewStep(
-		From(e.context.Table, e.context.ID.Column),
-		To(edge.To.Table, edge.To.ID.Column),
+		From(e.context.Table, fromC),
+		To(edge.To.Table, toC),
 		Edge(edge.Spec.Rel, edge.Spec.Inverse, edge.Spec.Table, edge.Spec.Columns...),
 	)
 	selector := e.selector.Clone().SetP(nil)
@@ -279,7 +300,7 @@ func (e *state) field(f *entql.Field) string {
 }
 
 func args(b *sql.Builder, v *entql.Value) {
-	vs, ok := v.V.([]interface{})
+	vs, ok := v.V.([]any)
 	if !ok {
 		b.Arg(v.V)
 		return
@@ -288,7 +309,7 @@ func args(b *sql.Builder, v *entql.Value) {
 }
 
 // expect panics if the condition is false.
-func expect(cond bool, msg string, args ...interface{}) {
+func expect(cond bool, msg string, args ...any) {
 	if !cond {
 		panic(evalError{fmt.Sprintf("expect "+msg, args...)})
 	}

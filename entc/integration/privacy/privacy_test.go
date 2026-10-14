@@ -24,7 +24,7 @@ func TestPrivacyRules(t *testing.T) {
 		"file:ent?mode=memory&cache=shared&_fk=1",
 	)
 	defer client.Close()
-	logf := rule.SetMutationLogFunc(func(string, ...interface{}) {
+	logf := rule.SetMutationLogFunc(func(string, ...any) {
 		require.FailNow(t, "hook called on privacy deny")
 	})
 	ctx := context.Background()
@@ -76,7 +76,7 @@ func TestPrivacyRules(t *testing.T) {
 	// DecisionContext returns a new context from the parent with a decision attached to it.
 	task3.Update().SetStatus(task.StatusClosed).SaveX(privacy.DecisionContext(natctx, privacy.Allow))
 	task3.Update().SetStatus(task.StatusClosed).SaveX(a8mctx)
-	// Update description is allow for other users in the team.
+	// Update description is allowed for other users in the team.
 	task3.Update().SetDescription("boring description").SaveX(natctx)
 	task3.Update().SetDescription("boring description").SaveX(a8mctx)
 }

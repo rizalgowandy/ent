@@ -39,8 +39,11 @@ func (Todo) Fields() []ent.Field {
 			Default(time.Now).
 			Immutable(),
 		field.Enum("status").
-			Values("in_progress", "completed").
-			Default("in_progress"),
+			NamedValues(
+				"InProgress", "IN_PROGRESS",
+				"Completed", "COMPLETED",
+			).
+			Default("IN_PROGRESS"),
 		field.Int("priority").
 			Default(0),
 	}

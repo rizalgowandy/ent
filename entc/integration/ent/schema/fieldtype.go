@@ -94,6 +94,11 @@ func (FieldType) Fields() []ent.Field { //nolint:funlen
 		// ----------------------------------------------------------------------------
 		// Dialect-specific types
 
+		field.Text("text").
+			Optional().
+			SchemaType(map[string]string{
+				dialect.MySQL: "mediumtext",
+			}),
 		field.Time("datetime").
 			Optional().
 			SchemaType(map[string]string{
@@ -203,7 +208,13 @@ func (FieldType) Fields() []ent.Field { //nolint:funlen
 			GoType(&sql.NullBool{}),
 		field.Time("deleted_at").
 			Optional().
-			GoType(&sql.NullTime{}),
+			GoType(&sql.NullTime{}).
+			Default(func() *sql.NullTime {
+				return &sql.NullTime{Time: time.Now(), Valid: true}
+			}).
+			UpdateDefault(func() *sql.NullTime {
+				return &sql.NullTime{Time: time.Now(), Valid: true}
+			}),
 		field.Bytes("raw_data").
 			Optional().
 			MaxLen(20).
@@ -250,7 +261,7 @@ func (FieldType) Fields() []ent.Field { //nolint:funlen
 		field.Enum("priority").
 			Optional().
 			GoType(role.Priority(0)),
-		field.UUID("uuid", uuid.UUID{}).
+		field.UUID("optional_uuid", uuid.UUID{}).
 			Optional(),
 		field.UUID("nillable_uuid", uuid.UUID{}).
 			Optional().
@@ -296,7 +307,7 @@ func (p Password) Value() (driver.Value, error) {
 	return string(p), nil
 }
 
-func (p *Password) Scan(src interface{}) error {
+func (p *Password) Scan(src any) error {
 	switch src := src.(type) {
 	case nil:
 		return nil
@@ -313,7 +324,7 @@ func (p *Password) Scan(src interface{}) error {
 
 type Strings []string
 
-func (s *Strings) Scan(v interface{}) (err error) {
+func (s *Strings) Scan(v any) (err error) {
 	switch v := v.(type) {
 	case nil:
 	case []byte:
@@ -331,7 +342,7 @@ func (s *Strings) scan(v string) error {
 		return nil
 	}
 	if l := len(v); l < 2 || v[0] != '{' && v[l-1] != '}' {
-		return fmt.Errorf("unexpcted array format %q", v)
+		return fmt.Errorf("unexpected array format %q", v)
 	}
 	*s = strings.Split(v[1:len(v)-1], ",")
 	return nil
@@ -343,7 +354,7 @@ func (s Strings) Value() (driver.Value, error) {
 
 type VString string
 
-func (s *VString) Scan(v interface{}) (err error) {
+func (s *VString) Scan(v any) (err error) {
 	switch v := v.(type) {
 	case nil:
 	case string:
@@ -370,7 +381,7 @@ func (t Triple) Value() (driver.Value, error) {
 }
 
 // Scan implements the Scanner interface.
-func (t *Triple) Scan(value interface{}) (err error) {
+func (t *Triple) Scan(value any) (err error) {
 	switch v := value.(type) {
 	case nil:
 	case []byte:
@@ -399,7 +410,7 @@ func (p Pair) Value() (driver.Value, error) {
 }
 
 // Scan implements the Scanner interface.
-func (p *Pair) Scan(value interface{}) (err error) {
+func (p *Pair) Scan(value any) (err error) {
 	switch v := value.(type) {
 	case nil:
 	case []byte:
@@ -429,7 +440,7 @@ func DefaultLink() *Link {
 }
 
 // Scan implements the Scanner interface.
-func (l *Link) Scan(value interface{}) (err error) {
+func (l *Link) Scan(value any) (err error) {
 	switch v := value.(type) {
 	case nil:
 	case []byte:
@@ -455,7 +466,7 @@ type MAC struct {
 }
 
 // Scan implements the Scanner interface.
-func (m *MAC) Scan(value interface{}) (err error) {
+func (m *MAC) Scan(value any) (err error) {
 	switch v := value.(type) {
 	case nil:
 	case []byte:
@@ -476,7 +487,7 @@ func (m MAC) Value() (driver.Value, error) {
 type StringScanner string
 
 // Scan implements the Scanner interface.
-func (s *StringScanner) Scan(value interface{}) (err error) {
+func (s *StringScanner) Scan(value any) (err error) {
 	switch v := value.(type) {
 	case nil:
 	case string:
@@ -500,7 +511,7 @@ func NewBigInt(i int64) BigInt {
 	return BigInt{Int: big.NewInt(i)}
 }
 
-func (b *BigInt) Scan(src interface{}) error {
+func (b *BigInt) Scan(src any) error {
 	var i sql.NullString
 	if err := i.Scan(src); err != nil {
 		return err

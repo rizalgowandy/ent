@@ -31,7 +31,6 @@ const config = {
   "organizationName": "ent",
   "projectName": "ent",
   "scripts": [
-    "https://buttons.github.io/buttons.js",
     "https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.0/clipboard.min.js",
     "/js/code-block-buttons.js",
     "/js/custom.js"
@@ -39,15 +38,9 @@ const config = {
   "favicon": "img/favicon.ico",
   "customFields": {
     "users": [
-      {
-        "caption": "User1",
-        "image": "/img/undraw_open_source.svg",
-        "infoLink": "https://www.facebook.com",
-        "pinned": true
-      }
     ],
-    "slackChannel": "/docs/slack",
-    "newsletter": "https://www.getrevue.co/profile/ent",
+    "slackChannel": "/docs/community#slack",
+    "newsletter": "https://entgo.substack.com/",
     "githubRepo": "https://github.com/ent/ent"
   },
   "onBrokenLinks": "log",
@@ -57,36 +50,69 @@ const config = {
       "@docusaurus/preset-classic",
       {
         "docs": {
-          "path": "../md",
-          "showLastUpdateAuthor": false,
-          "showLastUpdateTime": false,
+          path: "../md",
+          editUrl: 'https://github.com/ent/ent/edit/master/doc/md/',
+          showLastUpdateAuthor: true,
+          showLastUpdateTime: true,
           sidebarPath: require.resolve('./sidebars.js'),
         },
+        gtag: {
+          trackingID: "UA-189726777-1",
+        },
         "blog": {
+          "feedOptions": {
+            "type": 'all',
+            "copyright": `Copyright © ${new Date().getFullYear()}, The Ent Authors.`,
+          },
           "path": "blog",
           "blogSidebarCount": 'ALL',
           "blogSidebarTitle": 'All our posts',
         },
         "theme": {
-          "customCss": ["../src/css/custom.css"],
+          "customCss": require.resolve('./src/css/custom.css'),
         }
       }
     ]
   ],
-  "plugins": [],
+  "plugins": [
+      [
+        `@docusaurus/plugin-client-redirects`,{
+          redirects: [
+            {
+              to:'/docs/community',
+              from:'/docs/slack',
+            },
+          ],
+        },
+      ]
+  ],
   "themeConfig": {
     prism: {
-      additionalLanguages: ['gotemplate', 'protobuf'],
+      additionalLanguages: ['gotemplate', 'protobuf', "hcl"],
+      magicComments: [
+        {
+          className: 'theme-code-block-highlighted-line',
+          line: 'highlight-next-line',
+          block: {start: 'highlight-start', end: 'highlight-end'},
+        },
+        {
+          className: 'code-block-error-message',
+          line: 'highlight-next-line-error-message',
+        },
+        {
+          className: 'code-block-info-line',
+          line: 'highlight-next-line-info',
+          block: {start: 'highlight-info-start', end: 'highlight-info-end'},
+        },
+      ],
     },
     algolia: {
-      apiKey: "bfc8175da1bd5078f1c02e5c8a6fe782",
+      appId: "8OIT9XHKR1",
+      apiKey: "42c78b88ab39bda9adad782eba9e2aa2",
       indexName: "entgo",
     },
     colorMode: {
       disableSwitch: false,
-    },
-    googleAnalytics: {
-      trackingID: 'UA-189726777-1',
     },
     "navbar": {
       "title": "",
@@ -112,7 +138,7 @@ const config = {
         },
         {to: 'blog', label: 'Blog', position: 'left'},
         {
-          href: '/docs/slack',
+          href: '/docs/community#slack',
           position: 'right',
           className: 'header-slack-link',
           'aria-label': 'Slack channel',
@@ -124,7 +150,7 @@ const config = {
           'aria-label': 'Discord Server',
         },
         {
-          href: 'https://www.getrevue.co/profile/ent',
+          href: 'https://entgo.substack.com/',
           position: 'right',
           className: 'header-newsletter-link',
           'aria-label': 'Newsletter page',
@@ -172,23 +198,14 @@ const config = {
           "title": "Community",
           "items": [
             {"label": "GitHub", "to": "https://github.com/ent/ent"},
-            {"label": "Slack", "to": "/docs/slack"},
+            {"label": "Slack", "to": "/docs/community#slack"},
             {"label": "Discord", "to": "https://discord.gg/qZmPgTE6RX"},
-            {"label": "Newsletter", "to": "https://www.getrevue.co/profile/ent"},
+            {"label": "Newsletter", "to": "https://entgo.substack.com/"},
             {"label": "Discussions", "to": "https://github.com/ent/ent/discussions"},
             {
               "label": "Twitter",
               "to": "https://twitter.com/entgo_io"
             }
-          ]
-        },
-        {
-          "title": "Legal",
-          "items": [
-            {"label": "Privacy", "to": "https://opensource.facebook.com/legal/privacy/"},
-            {"label": "Terms", "to": "https://opensource.facebook.com/legal/terms/"},
-            {"label": "Data Policy", "to": "https://opensource.facebook.com/legal/data-policy/"},
-            {"label": "Cookie Policy", "to": "https://opensource.facebook.com/legal/cookie-policy/"},
           ]
         },
         {
@@ -205,34 +222,23 @@ const config = {
           ]
         }
       ],
-      logo: {
-        alt: 'Facebook Open Source Logo',
-        src: 'https://docusaurus.io/img/oss_logo.png',
-        href: 'https://opensource.facebook.com/',
-      },
       copyright: `
-      Copyright © ${new Date().getFullYear()} Facebook, Inc.
+      Copyright © ${new Date().getFullYear()}, The Ent Authors.
       The Go gopher was designed by <a href="http://reneefrench.blogspot.com/">Renee French</a>.
       <br/>
       The design is licensed under the Creative Commons 3.0 Attributions license. Read this 
-      <a href="https://blog.golang.org/gopher">article</a> for more details.
+      <a href="https://go.dev/blog/gopher">article</a> for more details.
       <br/>
       Design by Moriah Rich, illustration by Ariel Mashraki.
       `,
     },
-    "algolia": {
-      "apiKey": "bfc8175da1bd5078f1c02e5c8a6fe782",
-      "indexName": "entgo"
-    },
-    "gtag": {
-      "trackingID": "UA-189726777-1"
-    },
     announcementBar: {
-      id: 'announcementBar-1', // Increment on change
-      content: `⭐️ If you like Ent, give it a star on <a target="_blank" rel="noopener noreferrer" href="https://github.com/ent/ent">GitHub</a> and follow us on <a target="_blank" rel="noopener noreferrer" href="https://twitter.com/entgo_io" >Twitter</a> ${TwitterSvg}`,
+      id: 'announcementBar-2', // Increment on change
+      // content: `⭐️ If you like Ent, give it a star on <a target="_blank" rel="noopener noreferrer" href="https://github.com/ent/ent">GitHub</a> and follow us on <a target="_blank" rel="noopener noreferrer" href="https://twitter.com/entgo_io" >Twitter</a> ${TwitterSvg}`,
+      content: `<a style="text-decoration: none;" target="_blank" rel="noopener noreferrer" href="https://twitter.com/Israel/status/1713931519620788538">The Ent Team Stands With Israel 🇮🇱</a>`,
       backgroundColor: '#fafbfc',
-      textColor: '#091E42',
-      isCloseable: true,
+      textColor: '#404756',
+      isCloseable: false,
     },
   }
 };

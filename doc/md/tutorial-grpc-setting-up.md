@@ -15,7 +15,7 @@ go mod init ent-grpc-example
 Next, we use `go run` to invoke the ent code generator to initialize a schema:
 
 ```console
-go run -mod=mod entgo.io/ent/cmd/ent init User
+go run -mod=mod entgo.io/ent/cmd/ent new User
 ```
 
 Our directory should now look like:
@@ -38,7 +38,7 @@ go get -u entgo.io/contrib/entproto
 
 Next, we will define the schema for the `User` entity. Open `ent/schema/user.go` and edit:
 
-```go
+```go title="ent/schema/user.go"
 package schema
 
 import (

@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/entc/gen"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 )
 
 // A Config controls the output of Fprint.
@@ -39,34 +40,84 @@ func Fprint(w io.Writer, g *gen.Graph) {
 //			<Fields Table>
 //
 //			<Edges Table>
-//
 func (p Config) node(t *gen.Type) {
 	var (
 		b      strings.Builder
+		id     []*gen.Field
 		table  = tablewriter.NewWriter(&b)
-		header = []string{"Field", "Type", "Unique", "Optional", "Nillable", "Default", "UpdateDefault", "Immutable", "StructTag", "Validators"}
+		header = []string{"Field", "Type", "Unique", "Optional", "Nillable", "Default", "UpdateDefault", "Immutable", "StructTag", "Validators", "Comment"}
 	)
 	b.WriteString(t.Name + ":\n")
-	table.SetAutoFormatHeaders(false)
-	table.SetHeader(header)
-	for _, f := range append([]*gen.Field{t.ID}, t.Fields...) {
+	table.Options(
+		tablewriter.WithHeaderConfig(tw.CellConfig{
+			Padding: tw.CellPadding{
+				Global: tw.Padding{
+					Left:  tw.Space,
+					Right: tw.Space,
+				},
+			},
+			Formatting: tw.CellFormatting{
+				AutoFormat: tw.Off,
+			},
+		}),
+		tablewriter.WithRendition(tw.Rendition{
+			Symbols: tw.NewSymbols(tw.StyleASCII),
+		}),
+	)
+	table.Header(header)
+	var alignment = make([]tw.Align, 0)
+	if t.ID != nil {
+		id = append(id, t.ID)
+	}
+	for _, f := range append(id, t.Fields...) {
 		v := reflect.ValueOf(*f)
 		row := make([]string, len(header))
-		for i := range row {
+		for i := 0; i < len(row)-1; i++ {
 			field := v.FieldByNameFunc(func(name string) bool {
 				// The first field is mapped from "Name" to "Field".
 				return name == "Name" && i == 0 || name == header[i]
 			})
 			row[i] = fmt.Sprint(field.Interface())
+			_, err := strconv.Atoi(row[i])
+			if err == nil {
+				alignment = append(alignment, tw.AlignRight)
+			} else {
+				alignment = append(alignment, tw.AlignLeft)
+			}
 		}
-		table.Append(row)
+		row[len(row)-1] = f.Comment()
+		_ = table.Append(row)
+		table.Options(
+			tablewriter.WithRowAlignmentConfig(
+				tw.CellAlignment{PerColumn: alignment},
+			),
+		)
 	}
-	table.Render()
+	err := table.Render()
+	if err != nil {
+		return
+	}
+	// Create new table for edges
 	table = tablewriter.NewWriter(&b)
-	table.SetAutoFormatHeaders(false)
-	table.SetHeader([]string{"Edge", "Type", "Inverse", "BackRef", "Relation", "Unique", "Optional"})
+	table.Options(
+		tablewriter.WithHeaderConfig(tw.CellConfig{
+			Formatting: tw.CellFormatting{AutoFormat: tw.Off},
+			Padding: tw.CellPadding{
+				Global: tw.Padding{
+					Left:  tw.Space,
+					Right: tw.Space,
+				},
+			},
+		}),
+		tablewriter.WithRendition(tw.Rendition{
+			Symbols: tw.NewSymbols(tw.StyleASCII),
+		}),
+	)
+	table.Header([]string{"Edge", "Type", "Inverse", "BackRef", "Relation", "Unique", "Optional", "Comment"})
+	hasEdges := false
 	for _, e := range t.Edges {
-		table.Append([]string{
+		hasEdges = true
+		err := table.Append([]string{
 			e.Name,
 			e.Type.Name,
 			strconv.FormatBool(e.IsInverse()),
@@ -74,10 +125,17 @@ func (p Config) node(t *gen.Type) {
 			e.Rel.Type.String(),
 			strconv.FormatBool(e.Unique),
 			strconv.FormatBool(e.Optional),
+			e.Comment(),
 		})
+		if err != nil {
+			return
+		}
 	}
-	if table.NumLines() > 0 {
-		table.Render()
+	if hasEdges {
+		err := table.Render()
+		if err != nil {
+			return
+		}
 	}
 	io.WriteString(p, strings.ReplaceAll(b.String(), "\n", "\n\t")+"\n")
 }

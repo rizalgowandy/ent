@@ -21,21 +21,33 @@ func TestType(t *testing.T) {
 	require.Equal("T1", typ.Name)
 	require.Equal("t1", typ.Label())
 	require.Equal("t1", typ.Package())
-	require.Equal("t", typ.Receiver())
+	require.Equal("_m", typ.Receiver())
 
 	_, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{
 		Fields: []*load.Field{
-			{Unique: true, Default: true, Info: &field.TypeInfo{Type: field.TypeInt}},
+			{Name: "foo", Unique: true, Default: true, Info: &field.TypeInfo{Type: field.TypeInt}},
 		},
 	})
-	require.Error(err, "unique field can not have default")
+	require.EqualError(err, "unique field \"foo\" cannot have default value", "unique field can not have default")
 
 	_, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{
 		Fields: []*load.Field{
-			{Sensitive: true, Tag: `yaml:"pwd"`, Info: &field.TypeInfo{Type: field.TypeString}},
+			{Name: "foo", Sensitive: true, Tag: `yaml:"pwd"`, Info: &field.TypeInfo{Type: field.TypeString}},
 		},
 	})
-	require.Error(err, "sensitive field cannot have tags")
+	require.EqualError(err, "sensitive field \"foo\" cannot have struct tags", "sensitive field cannot have tags")
+
+	typ, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{
+		Fields: []*load.Field{
+			{Name: "id", Info: &field.TypeInfo{Type: field.TypeString}, Annotations: dict("EntSQL", dict("collation", "utf8_ci_bin"))},
+		},
+	})
+	require.NoError(err)
+	require.NotNil(typ)
+	require.NotNil(t, typ.ID)
+	pkCol := typ.ID.PK()
+	require.NotNil(pkCol)
+	require.Equal("utf8_ci_bin", pkCol.Collation)
 
 	_, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{
 		Name: "T",
@@ -44,7 +56,7 @@ func TestType(t *testing.T) {
 			{Name: "foo", Unique: true, Info: &field.TypeInfo{Type: field.TypeInt}},
 		},
 	})
-	require.Error(err, "field foo redeclared")
+	require.EqualError(err, "field \"foo\" redeclared for type \"T\"", "field foo redeclared")
 
 	_, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{
 		Name: "T",
@@ -52,7 +64,7 @@ func TestType(t *testing.T) {
 			{Name: "enums", Info: &field.TypeInfo{Type: field.TypeEnum}, Enums: []struct{ N, V string }{{V: "v"}, {V: "v"}}},
 		},
 	})
-	require.Error(err, "duplicate enums")
+	require.EqualError(err, "duplicate values \"v\" for enum field \"enums\"", "duplicate enums")
 
 	_, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{
 		Name: "T",
@@ -60,7 +72,7 @@ func TestType(t *testing.T) {
 			{Name: "enums", Info: &field.TypeInfo{Type: field.TypeEnum}, Enums: []struct{ N, V string }{{}}},
 		},
 	})
-	require.Error(err, "empty value for enums")
+	require.EqualError(err, "\"enums\" field value cannot be empty", "empty value for enums")
 
 	_, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{
 		Name: "T",
@@ -68,7 +80,24 @@ func TestType(t *testing.T) {
 			{Name: "", Info: &field.TypeInfo{Type: field.TypeInt}},
 		},
 	})
-	require.Error(err, "empty field name")
+	require.EqualError(err, "field name cannot be empty", "empty field name")
+
+	_, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{
+		Name: "T",
+		Fields: []*load.Field{
+			{Name: "id", Info: &field.TypeInfo{Type: field.TypeInt}, Optional: true},
+		},
+	})
+	require.EqualError(err, "id field cannot be optional", "id field cannot be optional")
+
+	typ, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{
+		Name: "T",
+		Fields: []*load.Field{
+			{Name: "id", Info: &field.TypeInfo{Type: field.TypeString}, ValueScanner: true},
+		},
+	})
+	require.NoError(err)
+	require.True(typ.HasValueScanner())
 
 	_, err = NewType(&Config{Package: "entc/gen"}, &load.Schema{Name: "Type"})
 	require.EqualError(err, "schema lowercase name conflicts with Go keyword \"type\"")
@@ -110,29 +139,6 @@ func TestType_Table(t *testing.T) {
 	for _, tt := range tests {
 		typ := &Type{Name: tt.name}
 		require.Equal(t, tt.label, typ.Table())
-	}
-}
-
-func TestType_Receiver(t *testing.T) {
-	tests := []struct {
-		name     string
-		receiver string
-	}{
-		{"User", "u"},
-		{"Group", "gr"},
-		{"UserData", "ud"},
-		{"UserInfo", "ui"},
-		{"User_Info", "ui"},
-		{"PHBUser", "pu"},
-		{"PHBOrg", "po"},
-		{"DomainSpecificLang", "dospla"},
-		{"[]byte", "b"},
-		{"[16]byte", "b"},
-		{"UserPKey", "up"},
-	}
-	for _, tt := range tests {
-		typ := &Type{Name: tt.name, Config: &Config{Package: "entc/gen"}}
-		require.Equal(t, tt.receiver, typ.Receiver())
 	}
 }
 
@@ -273,7 +279,7 @@ func TestField_DefaultName(t *testing.T) {
 
 func TestField_incremental(t *testing.T) {
 	tests := []struct {
-		annotations map[string]interface{}
+		annotations map[string]any
 		def         bool
 		expected    bool
 	}{
@@ -297,6 +303,7 @@ func TestBuilderField(t *testing.T) {
 		{"type", "_type"},
 		{"config", "_config"},
 		{"SSOCert", "_SSOCert"},
+		{"driver", "_driver"},
 	}
 	for _, tt := range tests {
 		require.Equal(t, tt.field, Edge{Name: tt.name}.BuilderField())
@@ -329,4 +336,131 @@ func TestValidSchemaName(t *testing.T) {
 	require.NoError(t, err)
 	err = ValidSchemaName("Order")
 	require.NoError(t, err)
+}
+
+func TestField_Blob(t *testing.T) {
+	require := require.New(t)
+
+	// Test creating a type with blob-stored fields.
+	typ, err := NewType(&Config{Package: "entc/gen"}, &load.Schema{
+		Name: "Document",
+		Fields: []*load.Field{
+			{
+				Name:     "content",
+				Info:     &field.TypeInfo{Type: field.TypeBlob},
+				Optional: true,
+				Comment:  "blob content",
+			},
+			{
+				Name: "thumbnail",
+				Info: &field.TypeInfo{Type: field.TypeBlob},
+			},
+			{
+				Name: "title",
+				Info: &field.TypeInfo{Type: field.TypeString},
+			},
+		},
+	})
+	require.NoError(err)
+	require.NotNil(typ)
+	require.Equal("Document", typ.Name)
+
+	// Find blob fields.
+	require.True(typ.HasBlobFields())
+	blobFields := typ.BlobFields()
+	require.Len(blobFields, 2)
+
+	// First blob field: content.
+	f0 := blobFields[0]
+	require.Equal("content", f0.Name)
+	require.True(f0.IsBlob())
+	require.True(f0.Optional)
+
+	// Second blob field: thumbnail.
+	f1 := blobFields[1]
+	require.Equal("thumbnail", f1.Name)
+	require.True(f1.IsBlob())
+
+	// Non-blob field should not be blob-stored.
+	titleField := typ.Fields[2]
+	require.Equal("title", titleField.Name)
+	require.False(titleField.IsBlob())
+
+	// MutationFields should exclude only lazy blob fields.
+	mutFields := typ.MutationFields()
+	for _, mf := range mutFields {
+		require.False(mf.IsBlobLazy(), "lazy blob field %s should not be in MutationFields", mf.Name)
+	}
+	// Non-lazy blob fields (content, thumbnail) should be in MutationFields
+	// because their mutation struct fields are used by the blob hook.
+	var blobInMut int
+	for _, mf := range mutFields {
+		if mf.IsBlob() {
+			blobInMut++
+		}
+	}
+	require.Equal(2, blobInMut)
+
+	// Type without blob fields.
+	typ2, err := NewType(&Config{Package: "entc/gen"}, &load.Schema{
+		Name: "Simple",
+		Fields: []*load.Field{
+			{Name: "name", Info: &field.TypeInfo{Type: field.TypeString}},
+		},
+	})
+	require.NoError(err)
+	require.False(typ2.HasBlobFields())
+	require.Empty(typ2.BlobFields())
+}
+
+func TestField_BlobScanType(t *testing.T) {
+	require := require.New(t)
+
+	typ, err := NewType(&Config{Package: "entc/gen"}, &load.Schema{
+		Name: "Doc",
+		Fields: []*load.Field{
+			{
+				Name: "data",
+				Info: &field.TypeInfo{Type: field.TypeBlob},
+			},
+		},
+	})
+	require.NoError(err)
+	f := typ.Fields[0]
+	require.True(f.IsBlob())
+	require.True(f.IsBlobNoColumn())
+	require.False(f.IsBlobLazy())
+	// Non-lazy blob fields appear in MutationFields (for blob hook usage),
+	// but are excluded from SQL columns by IsBlobNoColumn.
+	require.NotEmpty(typ.MutationFields())
+}
+
+func TestField_BlobCheckRefs(t *testing.T) {
+	require := require.New(t)
+	typ, err := NewType(&Config{Package: "entc/gen"}, &load.Schema{
+		Name: "Doc",
+		Fields: []*load.Field{
+			{Name: "checked", Info: &field.TypeInfo{Type: field.TypeBlob}, BlobCheckRefs: true},
+			{Name: "unchecked", Info: &field.TypeInfo{Type: field.TypeBlob}},
+			{Name: "title", Info: &field.TypeInfo{Type: field.TypeString}},
+		},
+	})
+	require.NoError(err)
+	require.True(typ.HasBlobRefCheckedFields())
+	checked := typ.BlobRefCheckedFields()
+	require.Len(checked, 1)
+	require.Equal("checked", checked[0].Name)
+	require.True(checked[0].IsBlobRefChecked())
+	require.False(typ.fields["unchecked"].IsBlobRefChecked())
+	// CheckRefs is meaningless on a non-blob field.
+	require.False(typ.fields["title"].IsBlobRefChecked())
+
+	// A type with no opted-in blob field reports none, so codegen can skip the lookup.
+	typ2, err := NewType(&Config{Package: "entc/gen"}, &load.Schema{
+		Name:   "Plain",
+		Fields: []*load.Field{{Name: "data", Info: &field.TypeInfo{Type: field.TypeBlob}}},
+	})
+	require.NoError(err)
+	require.False(typ2.HasBlobRefCheckedFields())
+	require.Empty(typ2.BlobRefCheckedFields())
 }

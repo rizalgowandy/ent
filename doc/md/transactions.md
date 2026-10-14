@@ -58,6 +58,13 @@ func rollback(tx *ent.Tx, err error) error {
 }
 ```
 
+You must call `Unwrap()` if you are querying edges off of a created entity after a successful transaction (example: `a8m.QueryGroups()`). Unwrap restores the state of the underlying client embedded within the entity to a non-transactable version. 
+
+:::warning Note
+Calling `Unwrap()` on a non-transactional entity (i.e., after a transaction has been committed or rolled back) will
+cause a panic.
+:::
+
 The full example exists in [GitHub](https://github.com/ent/ent/tree/master/examples/traversal).
 
 ## Transactional Client
@@ -108,12 +115,12 @@ func WithTx(ctx context.Context, client *ent.Client, fn func(tx *ent.Tx) error) 
 	}()
 	if err := fn(tx); err != nil {
 		if rerr := tx.Rollback(); rerr != nil {
-			err = errors.Wrapf(err, "rolling back transaction: %v", rerr)
+			err = fmt.Errorf("%w: rolling back transaction: %v", err, rerr)
 		}
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return errors.Wrapf(err, "committing transaction: %v", err)
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }
@@ -166,4 +173,12 @@ func Do(ctx context.Context, client *ent.Client) error {
     //
     return err
 }
+```
+
+## Isolation Levels
+
+Some drivers support tweaking a transaction's isolation level. For example, with the [sql](sql-integration.md) driver, you can do so with the `BeginTx` method.
+
+```go
+tx, err := client.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 ```

@@ -17,18 +17,18 @@ type encodeExtension struct {
 }
 
 // Marshal returns the graphson encoding of v.
-func Marshal(v interface{}) ([]byte, error) {
+func Marshal(v any) ([]byte, error) {
 	return config.Marshal(v)
 }
 
 // MarshalToString returns the graphson encoding of v as string.
-func MarshalToString(v interface{}) (string, error) {
+func MarshalToString(v any) (string, error) {
 	return config.MarshalToString(v)
 }
 
 // Encoder defines a graphson encoder.
 type Encoder interface {
-	Encode(interface{}) error
+	Encode(any) error
 }
 
 // NewEncoder create a graphson encoder.
@@ -93,6 +93,6 @@ func (ext encodeExtension) DecorateEncoder(typ reflect2.Type, enc jsoniter.ValEn
 	case reflect.Map:
 		return ext.DecoratorOfMap(enc)
 	default:
-		return ext.EncoderOfError("graphson: unsupported type: " + typ.String())
+		return ext.EncoderOfError("graphson: unsupported type: %s", typ.String())
 	}
 }

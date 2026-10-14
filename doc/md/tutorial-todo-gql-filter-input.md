@@ -4,7 +4,7 @@ title: Filter Inputs
 sidebar_label: Filter Inputs
 ---
 
-In this section, we continue the [GraphQL example](tutorial-todo-gql.md) by explaining how to generate
+In this section, we continue the [GraphQL example](tutorial-todo-gql.mdx) by explaining how to generate
 type-safe GraphQL filters (i.e. `Where` predicates) from our `ent/schema`, and allow users to seamlessly
 map GraphQL queries to Ent queries. For example, the following GraphQL query, maps to the Ent query below:
 
@@ -47,14 +47,15 @@ go run ./cmd/todo/
 
 ### Configure Ent
 
-Go to your `ent/entc.go` file, and add the 3 highlighted lines (extension options):
+Go to your `ent/entc.go` file, and add the 4 highlighted lines (extension options):
 
-```go {3-5} title="ent/entc.go"
+```go {3-6} title="ent/entc.go"
 func main() {
 	ex, err := entgql.NewExtension(
-		entgql.WithWhereFilters(true),
-		entgql.WithConfigPath("../gqlgen.yml"),
-		entgql.WithSchemaPath("../ent.graphql"),
+		entgql.WithSchemaGenerator(),
+		entgql.WithWhereInputs(true),
+		entgql.WithConfigPath("gqlgen.yml"),
+		entgql.WithSchemaPath("ent.graphql"),
 	)
 	if err != nil {
 		log.Fatalf("creating entgql extension: %v", err)
@@ -69,21 +70,21 @@ func main() {
 } 
 ```
 
-The `WithWhereFilters` option enables the filter generation, the `WithConfigPath` configures the path to the `gqlgen`
+The `WithWhereInputs` option enables the filter generation, the `WithConfigPath` configures the path to the `gqlgen`
 config file, which allows the extension to more accurately map GraphQL to Ent types. The last option `WithSchemaPath`,
 configures a path to a new, or an existing GraphQL schema to write the generated filters to.
 
 After changing the `entc.go` configuration, we're ready to execute the code generation as follows:
 
 ```console
-go generate ./ent/...
+go generate .
 ```
 
 Observe that Ent has generated `<T>WhereInput` for each type in your schema in a file named `ent/gql_where_input.go`. Ent
 also generates a GraphQL schema as well (`ent.graphql`), so you don't need to `autobind` them to `gqlgen` manually.
 For example:
 
-```go title="ent/where_input.go"
+```go title="ent/gql_where_input.go"
 // TodoWhereInput represents a where input for filtering Todo queries.
 type TodoWhereInput struct {
 	Not *TodoWhereInput   `json:"not,omitempty"`
@@ -157,7 +158,7 @@ schema:
 After running the code generation, we're ready to complete the integration and expose the filtering capabilities in GraphQL:
 
 1\. Edit the GraphQL schema to accept the new filter types:
-```graphql {8} 
+```graphql {8} title="ent.graphql"
 type Query {
   todos(
     after: Cursor,
@@ -166,12 +167,12 @@ type Query {
     last: Int,
     orderBy: TodoOrder,
     where: TodoWhereInput,
-  ): TodoConnection
+  ): TodoConnection!
 }
 ```
 
 2\. Use the new filter types in GraphQL resolvers:
-```go {5}
+```go {5} title="ent.resolvers.go"
 func (r *queryResolver) Todos(ctx context.Context, after *ent.Cursor, first *int, before *ent.Cursor, last *int, orderBy *ent.TodoOrder, where *ent.TodoWhereInput) (*ent.TodoConnection, error) {
 	return r.client.Todo.Query().
 		Paginate(ctx, after, first, before, last,
@@ -188,21 +189,33 @@ Go code.
 
 #### Conjunction, disjunction and negation
 
-The `Not`, `And` and `Or` operators can be added using the `not`, `and` and `or` fields. For example:
+The `Not`, `And` and `Or` operators can be added to the `where` clause using the `not`, `and` and `or` fields. For example:
 
-```graphql
-{
-  or: [
-    {
-      status: COMPLETED,
-    },
-    {
-      not: {
-        hasParent: true,
-        status: IN_PROGRESS,
-      }
+```graphql {3-15}
+query {
+  todos(
+    where: {
+      or: [
+        {
+          status: COMPLETED
+        },
+        {
+          not: {
+            hasParent: true,
+            status: IN_PROGRESS
+          }
+        }
+      ]
     }
-  ]
+  ) {
+    edges {
+      node {
+        id
+        text
+      }
+      cursor
+    }
+  }
 }
 ```
 
@@ -255,7 +268,76 @@ client.Todo.
 	All(ctx)
 ```
 
+### Custom filters
+
+Sometimes we need to add custom conditions to our filters, while it is always possible to use [Templates](https://pkg.go.dev/entgo.io/contrib@master/entgql#WithTemplates) and [SchemaHooks](https://pkg.go.dev/entgo.io/contrib@master/entgql#WithSchemaHook)
+it's not always the easiest solution, specially if we only want to add simple conditions.
+
+Luckily by using a combination of the [GraphQL object type extensions](https://spec.graphql.org/October2021/#sec-Object-Extensions) and custom resolvers, we can achieve this functionality.
+
+Let's see an example of adding a custom `isCompleted` filter that will receive a boolean value and filter
+all the TODO's that have the `completed` status.
+
+Let's start by extending the `TodoWhereInput`:
+
+```graphql title="todo.graphql"
+extend input TodoWhereInput {
+  isCompleted: Boolean
+}
+```
+
+After running the code generation, we should see a new field resolver inside the `todo.resolvers.go` file:
+
+```go title="todo.resolvers.go"
+func (r *todoWhereInputResolver) IsCompleted(ctx context.Context, obj *ent.TodoWhereInput, data *bool) error {
+	panic(fmt.Errorf("not implemented"))
+}
+```
+
+We can now use the `AddPredicates` method inside the `ent.TodoWhereInput` struct to implement our custom filtering:
+
+```go title="todo.resolvers.go"
+func (r *todoWhereInputResolver) IsCompleted(ctx context.Context, obj *ent.TodoWhereInput, data *bool) error {
+	if obj == nil || data == nil {
+		return nil
+	}
+	if *data {
+		obj.AddPredicates(todo.StatusEQ(todo.StatusCompleted))
+	} else {
+		obj.AddPredicates(todo.StatusNEQ(todo.StatusCompleted))
+	}
+	return nil
+}
+```
+
+We can use this new filtering as any other predicate:
+
+```graphql
+{
+  isCompleted: true,
+}
+# including the not, and and or fields
+{
+  not: {
+    isCompleted: true,
+  }
+}
+```
+
+### Usage as predicates
+
+The `Filter` option lets use the generated `WhereInput`s as regular predicates on any type of query:
+
+```go
+query := ent.Todo.Query()
+query, err := input.Filter(query)
+if err != nil {
+	return nil, err
+}
+return query.All(ctx)
+```
+
 ---
 
 Well done! As you can see, by changing a few lines of code our application now exposes a type-safe GraphQL filters
-that automatically map to Ent queries. Have questions? Need help with getting started? Feel free to join our [Slack channel](https://entgo.io/docs/slack).
+that automatically map to Ent queries. Have questions? Need help with getting started? Feel free to join our [Discord server](https://discord.gg/qZmPgTE6RX) or [Slack channel](https://entgo.io/docs/slack).

@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -19,7 +20,7 @@ import (
 	"entgo.io/ent/schema/field"
 )
 
-// Rel is a relation type of an edge.
+// Rel is an edge relation type.
 type Rel int
 
 // Relation types.
@@ -61,7 +62,7 @@ type Step struct {
 	From struct {
 		// V can be either one vertex or set of vertices.
 		// It can be a pre-processed step (sql.Query) or a simple Go type (integer or string).
-		V interface{}
+		V any
 		// Table holds the table name of V (from).
 		Table string
 		// Column to join with. Usually the "id" column.
@@ -99,7 +100,7 @@ type Step struct {
 type StepOption func(*Step)
 
 // From sets the source of the step.
-func From(table, column string, v ...interface{}) StepOption {
+func From(table, column string, v ...any) StepOption {
 	return func(s *Step) {
 		s.From.Table = table
 		s.From.Column = column
@@ -134,7 +135,6 @@ func Edge(rel Rel, inverse bool, table string, columns ...string) StepOption {
 //		To("table", "pk"),
 //		Edge("name", O2M, "fk"),
 //	)
-//
 func NewStep(opts ...StepOption) *Step {
 	s := &Step{}
 	for _, opt := range opts {
@@ -143,12 +143,29 @@ func NewStep(opts ...StepOption) *Step {
 	return s
 }
 
+// FromEdgeOwner returns true if the step is from an edge owner.
+// i.e., from the table that holds the foreign-key.
+func (s *Step) FromEdgeOwner() bool {
+	return s.Edge.Rel == M2O || (s.Edge.Rel == O2O && s.Edge.Inverse)
+}
+
+// ToEdgeOwner returns true if the step is to an edge owner.
+// i.e., to the table that holds the foreign-key.
+func (s *Step) ToEdgeOwner() bool {
+	return s.Edge.Rel == O2M || (s.Edge.Rel == O2O && !s.Edge.Inverse)
+}
+
+// ThroughEdgeTable returns true if the step is through a join-table.
+func (s *Step) ThroughEdgeTable() bool {
+	return s.Edge.Rel == M2M
+}
+
 // Neighbors returns a Selector for evaluating the path-step
 // and getting the neighbors of one vertex.
 func Neighbors(dialect string, s *Step) (q *sql.Selector) {
 	builder := sql.Dialect(dialect)
-	switch r := s.Edge.Rel; {
-	case r == M2M:
+	switch {
+	case s.ThroughEdgeTable():
 		pk1, pk2 := s.Edge.Columns[1], s.Edge.Columns[0]
 		if s.Edge.Inverse {
 			pk1, pk2 = pk2, pk1
@@ -162,7 +179,7 @@ func Neighbors(dialect string, s *Step) (q *sql.Selector) {
 			From(to).
 			Join(match).
 			On(to.C(s.To.Column), match.C(pk1))
-	case r == M2O || (r == O2O && s.Edge.Inverse):
+	case s.FromEdgeOwner():
 		t1 := builder.Table(s.To.Table).Schema(s.To.Schema)
 		t2 := builder.Select(s.Edge.Columns[0]).
 			From(builder.Table(s.Edge.Table).Schema(s.Edge.Schema)).
@@ -171,7 +188,7 @@ func Neighbors(dialect string, s *Step) (q *sql.Selector) {
 			From(t1).
 			Join(t2).
 			On(t1.C(s.To.Column), t2.C(s.Edge.Columns[0]))
-	case r == O2M || (r == O2O && !s.Edge.Inverse):
+	case s.ToEdgeOwner():
 		q = builder.Select().
 			From(builder.Table(s.To.Table).Schema(s.To.Schema)).
 			Where(sql.EQ(s.Edge.Columns[0], s.From.V))
@@ -184,8 +201,8 @@ func Neighbors(dialect string, s *Step) (q *sql.Selector) {
 func SetNeighbors(dialect string, s *Step) (q *sql.Selector) {
 	set := s.From.V.(*sql.Selector)
 	builder := sql.Dialect(dialect)
-	switch r := s.Edge.Rel; {
-	case r == M2M:
+	switch {
+	case s.ThroughEdgeTable():
 		pk1, pk2 := s.Edge.Columns[1], s.Edge.Columns[0]
 		if s.Edge.Inverse {
 			pk1, pk2 = pk2, pk1
@@ -201,14 +218,14 @@ func SetNeighbors(dialect string, s *Step) (q *sql.Selector) {
 			From(to).
 			Join(match).
 			On(to.C(s.To.Column), match.C(pk1))
-	case r == M2O || (r == O2O && s.Edge.Inverse):
+	case s.FromEdgeOwner():
 		t1 := builder.Table(s.To.Table).Schema(s.To.Schema)
 		set.Select(set.C(s.Edge.Columns[0]))
 		q = builder.Select().
 			From(t1).
 			Join(set).
 			On(t1.C(s.To.Column), set.C(s.Edge.Columns[0]))
-	case r == O2M || (r == O2O && !s.Edge.Inverse):
+	case s.ToEdgeOwner():
 		t1 := builder.Table(s.To.Table).Schema(s.To.Schema)
 		set.Select(set.C(s.From.Column))
 		q = builder.Select().
@@ -222,8 +239,8 @@ func SetNeighbors(dialect string, s *Step) (q *sql.Selector) {
 // HasNeighbors applies on the given Selector a neighbors check.
 func HasNeighbors(q *sql.Selector, s *Step) {
 	builder := sql.Dialect(q.Dialect())
-	switch r := s.Edge.Rel; {
-	case r == M2M:
+	switch {
+	case s.ThroughEdgeTable():
 		pk1 := s.Edge.Columns[0]
 		if s.Edge.Inverse {
 			pk1 = s.Edge.Columns[1]
@@ -235,16 +252,25 @@ func HasNeighbors(q *sql.Selector, s *Step) {
 				builder.Select(join.C(pk1)).From(join),
 			),
 		)
-	case r == M2O || (r == O2O && s.Edge.Inverse):
+	case s.FromEdgeOwner():
 		q.Where(sql.NotNull(q.C(s.Edge.Columns[0])))
-	case r == O2M || (r == O2O && !s.Edge.Inverse):
+	case s.ToEdgeOwner():
 		to := builder.Table(s.Edge.Table).Schema(s.Edge.Schema)
+		// In case the edge reside on the same table, give
+		// the edge an alias to make qualifier different.
+		if s.From.Table == s.Edge.Table {
+			to.As(fmt.Sprintf("%s_edge", s.Edge.Table))
+		}
 		q.Where(
-			sql.In(
-				q.C(s.From.Column),
+			sql.Exists(
 				builder.Select(to.C(s.Edge.Columns[0])).
 					From(to).
-					Where(sql.NotNull(to.C(s.Edge.Columns[0]))),
+					Where(
+						sql.ColumnsEQ(
+							q.C(s.From.Column),
+							to.C(s.Edge.Columns[0]),
+						),
+					),
 			),
 		)
 	}
@@ -254,8 +280,8 @@ func HasNeighbors(q *sql.Selector, s *Step) {
 // The given predicate applies its filtering on the selector.
 func HasNeighborsWith(q *sql.Selector, s *Step, pred func(*sql.Selector)) {
 	builder := sql.Dialect(q.Dialect())
-	switch r := s.Edge.Rel; {
-	case r == M2M:
+	switch {
+	case s.ThroughEdgeTable():
 		pk1, pk2 := s.Edge.Columns[1], s.Edge.Columns[0]
 		if s.Edge.Inverse {
 			pk1, pk2 = pk2, pk1
@@ -271,20 +297,327 @@ func HasNeighborsWith(q *sql.Selector, s *Step, pred func(*sql.Selector)) {
 		pred(matches)
 		join.FromSelect(matches)
 		q.Where(sql.In(q.C(s.From.Column), join))
-	case r == M2O || (r == O2O && s.Edge.Inverse):
+	case s.FromEdgeOwner():
 		to := builder.Table(s.To.Table).Schema(s.To.Schema)
+		// Avoid ambiguity in case both source
+		// and edge tables are the same.
+		if s.To.Table == q.TableName() {
+			to.As(fmt.Sprintf("%s_edge", s.To.Table))
+			// Choose the alias name until we do not
+			// have a collision. Limit to 5 iterations.
+			for i := 1; i <= 5; i++ {
+				if to.C("c") != q.C("c") {
+					break
+				}
+				to.As(fmt.Sprintf("%s_edge_%d", s.To.Table, i))
+			}
+		}
 		matches := builder.Select(to.C(s.To.Column)).
 			From(to)
 		matches.WithContext(q.Context())
+		matches.Where(
+			sql.ColumnsEQ(
+				q.C(s.Edge.Columns[0]),
+				to.C(s.To.Column),
+			),
+		)
 		pred(matches)
-		q.Where(sql.In(q.C(s.Edge.Columns[0]), matches))
-	case r == O2M || (r == O2O && !s.Edge.Inverse):
+		q.Where(sql.Exists(matches))
+	case s.ToEdgeOwner():
 		to := builder.Table(s.Edge.Table).Schema(s.Edge.Schema)
+		// Avoid ambiguity in case both source
+		// and edge tables are the same.
+		if s.Edge.Table == q.TableName() {
+			to.As(fmt.Sprintf("%s_edge", s.Edge.Table))
+			// Choose the alias name until we do not
+			// have a collision. Limit to 5 iterations.
+			for i := 1; i <= 5; i++ {
+				if to.C("c") != q.C("c") {
+					break
+				}
+				to.As(fmt.Sprintf("%s_edge_%d", s.Edge.Table, i))
+			}
+		}
 		matches := builder.Select(to.C(s.Edge.Columns[0])).
 			From(to)
 		matches.WithContext(q.Context())
+		matches.Where(
+			sql.ColumnsEQ(
+				q.C(s.From.Column),
+				to.C(s.Edge.Columns[0]),
+			),
+		)
 		pred(matches)
-		q.Where(sql.In(q.C(s.From.Column), matches))
+		q.Where(sql.Exists(matches))
+	}
+}
+
+// countAlias returns the alias to use for the count column.
+func countAlias(q *sql.Selector, s *Step, opt *sql.OrderTermOptions) string {
+	if opt.As != "" {
+		return opt.As
+	}
+	selected := make(map[string]struct{})
+	for _, c := range q.SelectedColumns() {
+		selected[c] = struct{}{}
+	}
+	column := fmt.Sprintf("count_%s", s.To.Table)
+	// If the column was already selected,
+	// try to find a free alias.
+	if _, ok := selected[column]; ok {
+		for i := 1; i <= 5; i++ {
+			ci := fmt.Sprintf("%s_%d", column, i)
+			if _, ok := selected[ci]; !ok {
+				return ci
+			}
+		}
+	}
+	return column
+}
+
+// OrderByNeighborsCount appends ordering based on the number of neighbors.
+// For example, order users by their number of posts.
+func OrderByNeighborsCount(q *sql.Selector, s *Step, opts ...sql.OrderTermOption) {
+	var (
+		join  *sql.Selector
+		opt   = sql.NewOrderTermOptions(opts...)
+		build = sql.Dialect(q.Dialect())
+	)
+	switch {
+	case s.FromEdgeOwner():
+		// For M2O and O2O inverse, the FK resides in the same table.
+		// Hence, the order by is on the nullability of the column.
+		x := func(b *sql.Builder) {
+			b.Ident(s.From.Column)
+			if opt.Desc {
+				b.WriteOp(sql.OpNotNull)
+			} else {
+				b.WriteOp(sql.OpIsNull)
+			}
+		}
+		q.OrderExpr(build.Expr(x))
+	case s.ThroughEdgeTable():
+		countAs := countAlias(q, s, opt)
+		terms := []sql.OrderTerm{
+			sql.OrderByCount("*", append([]sql.OrderTermOption{sql.OrderAs(countAs)}, opts...)...),
+		}
+		pk1 := s.Edge.Columns[0]
+		if s.Edge.Inverse {
+			pk1 = s.Edge.Columns[1]
+		}
+		joinT := build.Table(s.Edge.Table).Schema(s.Edge.Schema)
+		join = build.Select(
+			joinT.C(pk1),
+		).From(joinT).GroupBy(joinT.C(pk1))
+		selectTerms(join, terms)
+		q.LeftJoin(join).
+			On(
+				q.C(s.From.Column),
+				join.C(pk1),
+			)
+		orderTerms(q, join, terms)
+	case s.ToEdgeOwner():
+		countAs := countAlias(q, s, opt)
+		terms := []sql.OrderTerm{
+			sql.OrderByCount("*", append([]sql.OrderTermOption{sql.OrderAs(countAs)}, opts...)...),
+		}
+		edgeT := build.Table(s.Edge.Table).Schema(s.Edge.Schema)
+		join = build.Select(
+			edgeT.C(s.Edge.Columns[0]),
+		).From(edgeT).GroupBy(edgeT.C(s.Edge.Columns[0]))
+		selectTerms(join, terms)
+		q.LeftJoin(join).
+			On(
+				q.C(s.From.Column),
+				join.C(s.Edge.Columns[0]),
+			)
+		orderTerms(q, join, terms)
+	}
+}
+
+func orderTerms(q, join *sql.Selector, ts []sql.OrderTerm) {
+	for _, t := range ts {
+		t := t
+		var (
+			// Order by column or expression.
+			orderC string
+			orderX func(*sql.Selector) sql.Querier
+			// Order by options.
+			desc, nullsfirst, nullslast bool
+		)
+		switch t := t.(type) {
+		case *sql.OrderFieldTerm:
+			f := t.Field
+			if t.As != "" {
+				f = t.As
+			}
+			orderC = join.C(f)
+			if t.Selected {
+				q.AppendSelect(orderC)
+			}
+			desc = t.Desc
+			nullsfirst = t.NullsFirst
+			nullslast = t.NullsLast
+		case *sql.OrderExprTerm:
+			if t.As != "" {
+				orderC = join.C(t.As)
+				if t.Selected {
+					q.AppendSelect(orderC)
+				}
+			} else {
+				orderX = t.Expr
+			}
+			desc = t.Desc
+			nullsfirst = t.NullsFirst
+			nullslast = t.NullsLast
+		default:
+			continue
+		}
+		q.OrderExprFunc(func(b *sql.Builder) {
+			// Write the ORDER BY term.
+			switch {
+			case orderC != "":
+				b.WriteString(orderC)
+			case orderX != nil:
+				b.Join(orderX(join))
+			}
+			// Unlike MySQL and SQLite, NULL values sort as if larger than any other value. Therefore,
+			// we need to explicitly order NULLs first on ASC and last on DESC unless specified otherwise.
+			switch normalizePG := b.Dialect() == dialect.Postgres && !nullsfirst && !nullslast; {
+			case normalizePG && desc:
+				b.WriteString(" DESC NULLS LAST")
+			case normalizePG:
+				b.WriteString(" NULLS FIRST")
+			case desc:
+				b.WriteString(" DESC")
+			}
+			if nullsfirst {
+				b.WriteString(" NULLS FIRST")
+			} else if nullslast {
+				b.WriteString(" NULLS LAST")
+			}
+		})
+	}
+}
+
+// selectTerms appends the select terms to the joined query.
+// Afterward, the term aliases are utilized to order the root query.
+func selectTerms(q *sql.Selector, ts []sql.OrderTerm) {
+	for _, t := range ts {
+		switch t := t.(type) {
+		case *sql.OrderFieldTerm:
+			if t.As != "" {
+				q.AppendSelectAs(q.C(t.Field), t.As)
+			} else {
+				q.AppendSelect(q.C(t.Field))
+			}
+		case *sql.OrderExprTerm:
+			q.AppendSelectExprAs(t.Expr(q), t.As)
+		}
+	}
+}
+
+// OrderByNeighborTerms appends ordering based on the number of neighbors.
+// For example, order users by their number of posts.
+func OrderByNeighborTerms(q *sql.Selector, s *Step, opts ...sql.OrderTerm) {
+	var (
+		join  *sql.Selector
+		build = sql.Dialect(q.Dialect())
+	)
+	switch {
+	case s.FromEdgeOwner():
+		toT := build.Table(s.To.Table).Schema(s.To.Schema)
+		join = build.Select(toT.C(s.To.Column)).
+			From(toT)
+		selectTerms(join, opts)
+		q.LeftJoin(join).
+			On(q.C(s.Edge.Columns[0]), join.C(s.To.Column))
+	case s.ThroughEdgeTable():
+		pk1, pk2 := s.Edge.Columns[1], s.Edge.Columns[0]
+		if s.Edge.Inverse {
+			pk1, pk2 = pk2, pk1
+		}
+		toT := build.Table(s.To.Table).Schema(s.To.Schema)
+		joinT := build.Table(s.Edge.Table).Schema(s.Edge.Schema)
+		join = build.Select(pk2).
+			From(toT).
+			Join(joinT).
+			On(toT.C(s.To.Column), joinT.C(pk1)).
+			GroupBy(pk2)
+		selectTerms(join, opts)
+		q.LeftJoin(join).
+			On(q.C(s.From.Column), join.C(pk2))
+	case s.ToEdgeOwner():
+		toT := build.Table(s.Edge.Table).Schema(s.Edge.Schema)
+		join = build.Select(toT.C(s.Edge.Columns[0])).
+			From(toT).
+			GroupBy(toT.C(s.Edge.Columns[0]))
+		selectTerms(join, opts)
+		q.LeftJoin(join).
+			On(q.C(s.From.Column), join.C(s.Edge.Columns[0]))
+	}
+	orderTerms(q, join, opts)
+}
+
+// NeighborsLimit provides a modifier function that limits the
+// number of neighbors (rows) loaded per parent row (node).
+type NeighborsLimit struct {
+	// SrcCTE, LimitCTE and RowNumber hold the identifier names
+	// to src query, new limited one (using window function) and
+	// the column for counting rows.
+	SrcCTE, LimitCTE, RowNumber string
+	// DefaultOrderField sets the default ordering for
+	// sub-queries in case no order terms were provided.
+	DefaultOrderField string
+}
+
+// LimitNeighbors returns a modifier that limits the number of neighbors (rows) loaded per parent
+// row (node). The "partitionBy" is the foreign-key column (edge) to partition the window function
+// by, the "limit" is the maximum number of rows per parent, and the "orderBy" defines the order of
+// how neighbors (connected by the edge) are returned.
+//
+// This function is useful for non-unique edges, such as O2M and M2M, where the same parent can
+// have multiple children.
+func LimitNeighbors(partitionBy string, limit int, orderBy ...sql.Querier) func(*sql.Selector) {
+	l := &NeighborsLimit{
+		SrcCTE:            "src_query",
+		LimitCTE:          "limited_query",
+		RowNumber:         "row_number",
+		DefaultOrderField: "id",
+	}
+	return l.Modifier(partitionBy, limit, orderBy...)
+}
+
+// Modifier returns a modifier function that limits the number of rows of the eager load query.
+func (l *NeighborsLimit) Modifier(partitionBy string, limit int, orderBy ...sql.Querier) func(s *sql.Selector) {
+	return func(s *sql.Selector) {
+		var (
+			d  = sql.Dialect(s.Dialect())
+			rn = sql.RowNumber().PartitionBy(partitionBy)
+		)
+		switch {
+		case len(orderBy) > 0:
+			rn.OrderExpr(orderBy...)
+		case l.DefaultOrderField != "":
+			rn.OrderBy(l.DefaultOrderField)
+		default:
+			s.AddError(errors.New("no order terms provided for window function"))
+			return
+		}
+		s.SetDistinct(false)
+		with := d.With(l.SrcCTE).
+			As(s.Clone()).
+			With(l.LimitCTE).
+			As(
+				d.Select("*").
+					AppendSelectExprAs(rn, l.RowNumber).
+					From(d.Table(l.SrcCTE)),
+			)
+		t := d.Table(l.LimitCTE).As(s.TableName())
+		*s = *d.Select(s.UnqualifiedColumns()...).
+			From(t).
+			Where(sql.LTE(t.C(l.RowNumber), limit)).
+			Prefix(with)
 	}
 }
 
@@ -302,6 +635,9 @@ type (
 	EdgeTarget struct {
 		Nodes  []driver.Value
 		IDSpec *FieldSpec
+		// Additional fields can be set on the
+		// edge join table. Valid for M2M edges.
+		Fields []*FieldSpec
 	}
 
 	// EdgeSpec holds the information for updating a field
@@ -322,12 +658,38 @@ type (
 	// NodeSpec defines the information for querying and
 	// decoding nodes in the graph.
 	NodeSpec struct {
-		Table   string
-		Schema  string
-		Columns []string
-		ID      *FieldSpec
+		Table       string
+		Schema      string
+		Columns     []string
+		ID          *FieldSpec   // primary key.
+		CompositeID []*FieldSpec // composite id (edge schema).
 	}
 )
+
+// NewFieldSpec creates a new FieldSpec with its required fields.
+func NewFieldSpec(column string, typ field.Type) *FieldSpec {
+	return &FieldSpec{Column: column, Type: typ}
+}
+
+// AddColumnOnce adds the given column to the spec if it is not already present.
+func (n *NodeSpec) AddColumnOnce(column string) *NodeSpec {
+	for _, c := range n.Columns {
+		if c == column {
+			return n
+		}
+	}
+	n.Columns = append(n.Columns, column)
+	return n
+}
+
+// FieldValues returns the values of additional fields that were set on the join-table.
+func (e *EdgeTarget) FieldValues() []any {
+	vs := make([]any, len(e.Fields))
+	for i, f := range e.Fields {
+		vs[i] = f.Value
+	}
+	return vs
+}
 
 type (
 	// CreateSpec holds the information for creating
@@ -369,7 +731,22 @@ type (
 	}
 )
 
-// CreateNode applies the CreateSpec on the graph.
+// NewCreateSpec creates a new node creation spec.
+func NewCreateSpec(table string, id *FieldSpec) *CreateSpec {
+	return &CreateSpec{Table: table, ID: id}
+}
+
+// SetField appends a new field setter to the creation spec.
+func (u *CreateSpec) SetField(column string, t field.Type, value driver.Value) {
+	u.Fields = append(u.Fields, &FieldSpec{
+		Column: column,
+		Type:   t,
+		Value:  value,
+	})
+}
+
+// CreateNode applies the CreateSpec on the graph. The operation creates a new
+// record in the database, and connects it to other nodes specified in spec.Edges.
 func CreateNode(ctx context.Context, drv dialect.Driver, spec *CreateSpec) error {
 	gr := graph{tx: drv, builder: sql.Dialect(drv.Dialect())}
 	cr := &creator{CreateSpec: spec, graph: gr}
@@ -378,16 +755,9 @@ func CreateNode(ctx context.Context, drv dialect.Driver, spec *CreateSpec) error
 
 // BatchCreate applies the BatchCreateSpec on the graph.
 func BatchCreate(ctx context.Context, drv dialect.Driver, spec *BatchCreateSpec) error {
-	tx, err := drv.Tx(ctx)
-	if err != nil {
-		return err
-	}
-	gr := graph{tx: tx, builder: sql.Dialect(drv.Dialect())}
-	cr := &creator{BatchCreateSpec: spec, graph: gr}
-	if err := cr.nodes(ctx, tx); err != nil {
-		return rollback(tx, err)
-	}
-	return tx.Commit()
+	gr := graph{tx: drv, builder: sql.Dialect(drv.Dialect())}
+	cr := &batchCreator{BatchCreateSpec: spec, graph: gr}
+	return cr.nodes(ctx, drv)
 }
 
 type (
@@ -411,11 +781,62 @@ type (
 		Edges     EdgeMut
 		Fields    FieldMut
 		Predicate func(*sql.Selector)
+		Modifiers []func(*sql.UpdateBuilder)
 
-		ScanValues func(columns []string) ([]interface{}, error)
-		Assign     func(columns []string, values []interface{}) error
+		ScanValues func(columns []string) ([]any, error)
+		Assign     func(columns []string, values []any) error
 	}
 )
+
+// NewUpdateSpec creates a new node update spec.
+func NewUpdateSpec(table string, columns []string, id ...*FieldSpec) *UpdateSpec {
+	spec := &UpdateSpec{
+		Node: &NodeSpec{Table: table, Columns: columns},
+	}
+	switch {
+	case len(id) == 1:
+		spec.Node.ID = id[0]
+	case len(id) > 1:
+		spec.Node.CompositeID = id
+	}
+	return spec
+}
+
+// AddModifier adds a new statement modifier to the spec.
+func (u *UpdateSpec) AddModifier(m func(*sql.UpdateBuilder)) {
+	u.Modifiers = append(u.Modifiers, m)
+}
+
+// AddModifiers adds a list of statement modifiers to the spec.
+func (u *UpdateSpec) AddModifiers(m ...func(*sql.UpdateBuilder)) {
+	u.Modifiers = append(u.Modifiers, m...)
+}
+
+// SetField appends a new field setter to the update spec.
+func (u *UpdateSpec) SetField(column string, t field.Type, value driver.Value) {
+	u.Fields.Set = append(u.Fields.Set, &FieldSpec{
+		Column: column,
+		Type:   t,
+		Value:  value,
+	})
+}
+
+// AddField appends a new field adder to the update spec.
+func (u *UpdateSpec) AddField(column string, t field.Type, value driver.Value) {
+	u.Fields.Add = append(u.Fields.Add, &FieldSpec{
+		Column: column,
+		Type:   t,
+		Value:  value,
+	})
+}
+
+// ClearField appends a new field cleaner (set to NULL) to the update spec.
+func (u *UpdateSpec) ClearField(column string, t field.Type) {
+	u.Fields.Clear = append(u.Fields.Clear, &FieldSpec{
+		Column: column,
+		Type:   t,
+	})
+}
 
 // UpdateNode applies the UpdateSpec on one node in the graph.
 func UpdateNode(ctx context.Context, drv dialect.Driver, spec *UpdateSpec) error {
@@ -439,7 +860,7 @@ func UpdateNodes(ctx context.Context, drv dialect.Driver, spec *UpdateSpec) (int
 }
 
 // NotFoundError returns when trying to update an
-// entity and it was not found in the database.
+// entity, and it was not found in the database.
 type NotFoundError struct {
 	table string
 	id    driver.Value
@@ -454,6 +875,11 @@ func (e *NotFoundError) Error() string {
 type DeleteSpec struct {
 	Node      *NodeSpec
 	Predicate func(*sql.Selector)
+}
+
+// NewDeleteSpec creates a new node deletion spec.
+func NewDeleteSpec(table string, id *FieldSpec) *DeleteSpec {
+	return &DeleteSpec{Node: &NodeSpec{Table: table, ID: id}}
 }
 
 // DeleteNodes applies the DeleteSpec on the graph.
@@ -492,8 +918,19 @@ type QuerySpec struct {
 	Predicate func(*sql.Selector)
 	Modifiers []func(*sql.Selector)
 
-	ScanValues func(columns []string) ([]interface{}, error)
-	Assign     func(columns []string, values []interface{}) error
+	ScanValues func(columns []string) ([]any, error)
+	Assign     func(columns []string, values []any) error
+}
+
+// NewQuerySpec creates a new node query spec.
+func NewQuerySpec(table string, columns []string, id *FieldSpec) *QuerySpec {
+	return &QuerySpec{
+		Node: &NodeSpec{
+			ID:      id,
+			Table:   table,
+			Columns: columns,
+		},
+	}
 }
 
 // QueryNodes queries the nodes in the graph query and scans them to the given values.
@@ -515,8 +952,8 @@ func CountNodes(ctx context.Context, drv dialect.Driver, spec *QuerySpec) (int, 
 type EdgeQuerySpec struct {
 	Edge       *EdgeSpec
 	Predicate  func(*sql.Selector)
-	ScanValues func() [2]interface{}
-	Assign     func(out, in interface{}) error
+	ScanValues func() [2]any
+	Assign     func(out, in any) error
 }
 
 // QueryEdges queries the edges in the graph and scans the result with the given dest function.
@@ -577,6 +1014,11 @@ func (q *query) nodes(ctx context.Context, drv dialect.Driver) error {
 		if err != nil {
 			return err
 		}
+		for i, v := range values {
+			if _, ok := v.(*sql.UnknownType); ok {
+				values[i] = sql.ScanTypeOf(rows, i)
+			}
+		}
 		if err := rows.Scan(values...); err != nil {
 			return err
 		}
@@ -593,10 +1035,15 @@ func (q *query) count(ctx context.Context, drv dialect.Driver) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Remove any ORDER BY clauses present in the COUNT query as
+	// they are not allowed in some databases, such as PostgreSQL.
+	if q.Order != nil {
+		selector.ClearOrder()
+	}
 	// If no columns were selected in count,
 	// the default selection is by node ids.
 	columns := q.Node.Columns
-	if len(columns) == 0 {
+	if len(columns) == 0 && q.Node.ID != nil {
 		columns = append(columns, q.Node.ID.Column)
 	}
 	for i, c := range columns {
@@ -623,13 +1070,14 @@ func (q *query) selector(ctx context.Context) (*sql.Selector, error) {
 		WithContext(ctx)
 	if q.From != nil {
 		selector = q.From
+		selector.WithContext(ctx)
 	}
 	selector.Select(selector.Columns(q.Node.Columns...)...)
-	if pred := q.Predicate; pred != nil {
-		pred(selector)
-	}
 	if order := q.Order; order != nil {
 		order(selector)
+	}
+	if pred := q.Predicate; pred != nil {
+		pred(selector)
 	}
 	if q.Offset != 0 {
 		// Limit is mandatory for the offset clause. We start
@@ -658,13 +1106,28 @@ type updater struct {
 
 func (u *updater) node(ctx context.Context, tx dialect.ExecQuerier) error {
 	var (
-		// id holds the PK of the node used for linking
-		// it with the other nodes.
-		id         = u.Node.ID.Value
+		id         driver.Value
+		idp        *sql.Predicate
 		addEdges   = EdgeSpecs(u.Edges.Add).GroupRel()
 		clearEdges = EdgeSpecs(u.Edges.Clear).GroupRel()
 	)
-	update := u.builder.Update(u.Node.Table).Schema(u.Node.Schema).Where(sql.EQ(u.Node.ID.Column, id))
+	switch {
+	// In case it is not an edge schema, the id holds the PK
+	// of the node used for linking it with the other nodes.
+	case u.Node.ID != nil:
+		id = u.Node.ID.Value
+		idp = sql.EQ(u.Node.ID.Column, id)
+	case len(u.Node.CompositeID) == 2:
+		idp = sql.And(
+			sql.EQ(u.Node.CompositeID[0].Column, u.Node.CompositeID[0].Value),
+			sql.EQ(u.Node.CompositeID[1].Column, u.Node.CompositeID[1].Value),
+		)
+	case len(u.Node.CompositeID) != 2:
+		return fmt.Errorf("sql/sqlgraph: invalid composite id for update table %q", u.Node.Table)
+	default:
+		return fmt.Errorf("sql/sqlgraph: missing node id for update table %q", u.Node.Table)
+	}
+	update := u.builder.Update(u.Node.Table).Schema(u.Node.Schema).Where(idp)
 	if pred := u.Predicate; pred != nil {
 		selector := u.builder.Select().From(u.builder.Table(u.Node.Table).Schema(u.Node.Schema))
 		pred(selector)
@@ -673,15 +1136,35 @@ func (u *updater) node(ctx context.Context, tx dialect.ExecQuerier) error {
 	if err := u.setTableColumns(update, addEdges, clearEdges); err != nil {
 		return err
 	}
+	for _, m := range u.Modifiers {
+		m(update)
+	}
+	if err := update.Err(); err != nil {
+		return err
+	}
 	if !update.Empty() {
 		var res sql.Result
 		query, args := update.Query()
 		if err := tx.Exec(ctx, query, args, &res); err != nil {
 			return err
 		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		// In case there are zero affected rows by this statement, we need to distinguish
+		// between the case of "record was not found" and "record was not changed".
+		if affected == 0 && u.Predicate != nil {
+			if err := u.ensureExists(ctx); err != nil {
+				return err
+			}
+		}
 	}
-	if err := u.setExternalEdges(ctx, []driver.Value{id}, addEdges, clearEdges); err != nil {
-		return err
+	if id != nil {
+		// Not an edge schema.
+		if err := u.setExternalEdges(ctx, []driver.Value{id}, addEdges, clearEdges); err != nil {
+			return err
+		}
 	}
 	// Ignore querying the database when there's nothing
 	// to scan into it.
@@ -690,10 +1173,10 @@ func (u *updater) node(ctx context.Context, tx dialect.ExecQuerier) error {
 	}
 	selector := u.builder.Select(u.Node.Columns...).
 		From(u.builder.Table(u.Node.Table).Schema(u.Node.Schema)).
-		Where(sql.EQ(u.Node.ID.Column, u.Node.ID.Value))
-	if pred := u.Predicate; pred != nil {
-		pred(selector)
-	}
+		// Skip adding the custom predicates that were attached
+		// to the updater as they may point to columns that were
+		// changed by the UPDATE statement.
+		Where(idp)
 	rows := &sql.Rows{}
 	query, args := selector.Query()
 	if err := tx.Query(ctx, query, args, rows); err != nil {
@@ -708,10 +1191,27 @@ func (u *updater) nodes(ctx context.Context, drv dialect.Driver) (int, error) {
 		clearEdges = EdgeSpecs(u.Edges.Clear).GroupRel()
 		multiple   = hasExternalEdges(addEdges, clearEdges)
 		update     = u.builder.Update(u.Node.Table).Schema(u.Node.Schema)
-		selector   = u.builder.Select(u.Node.ID.Column).
+		selector   = u.builder.Select().
 				From(u.builder.Table(u.Node.Table).Schema(u.Node.Schema)).
 				WithContext(ctx)
 	)
+	switch {
+	// In case it is not an edge schema, the id holds the PK of
+	// the returned nodes are used for updating external tables.
+	case u.Node.ID != nil:
+		selector.Select(u.Node.ID.Column)
+	case len(u.Node.CompositeID) == 2:
+		// Other edge-schemas (M2M tables) cannot be updated by this operation.
+		// Also, in case there is a need to update an external foreign-key, it must
+		// be a single value and the user should use the "update by id" API instead.
+		if multiple {
+			return 0, fmt.Errorf("sql/sqlgraph: update edge schema table %q cannot update external tables", u.Node.Table)
+		}
+	case len(u.Node.CompositeID) != 2:
+		return 0, fmt.Errorf("sql/sqlgraph: invalid composite id for update table %q", u.Node.Table)
+	default:
+		return 0, fmt.Errorf("sql/sqlgraph: missing node id for update table %q", u.Node.Table)
+	}
 	if err := u.setTableColumns(update, addEdges, clearEdges); err != nil {
 		return 0, err
 	}
@@ -766,6 +1266,12 @@ func (u *updater) nodes(ctx context.Context, drv dialect.Driver) (int, error) {
 }
 
 func (u *updater) updateTable(ctx context.Context, stmt *sql.UpdateBuilder) (int, error) {
+	for _, m := range u.Modifiers {
+		m(stmt)
+	}
+	if err := stmt.Err(); err != nil {
+		return 0, err
+	}
 	if stmt.Empty() {
 		return 0, nil
 	}
@@ -847,11 +1353,19 @@ func (u *updater) scan(rows *sql.Rows) error {
 		if err := rows.Err(); err != nil {
 			return err
 		}
+		if len(u.Node.CompositeID) == 2 {
+			return &NotFoundError{table: u.Node.Table, id: []driver.Value{u.Node.CompositeID[0].Value, u.Node.CompositeID[1].Value}}
+		}
 		return &NotFoundError{table: u.Node.Table, id: u.Node.ID.Value}
 	}
 	values, err := u.ScanValues(columns)
 	if err != nil {
 		return err
+	}
+	for i, v := range values {
+		if _, ok := v.(*sql.UnknownType); ok {
+			values[i] = sql.ScanTypeOf(rows, i)
+		}
 	}
 	if err := rows.Scan(values...); err != nil {
 		return fmt.Errorf("failed scanning rows: %w", err)
@@ -862,10 +1376,34 @@ func (u *updater) scan(rows *sql.Rows) error {
 	return nil
 }
 
+func (u *updater) ensureExists(ctx context.Context) error {
+	exists := u.builder.Select().From(u.builder.Table(u.Node.Table).Schema(u.Node.Schema)).Where(sql.EQ(u.Node.ID.Column, u.Node.ID.Value))
+	u.Predicate(exists)
+	// In a REPEATABLE READ transaction, MySQL matches the UPDATE against the latest committed
+	// rows, but serves a plain SELECT from the transaction snapshot. A locking read sees what the
+	// UPDATE saw, so a row changed by a concurrent transaction is not taken for an unchanged one.
+	if exists.Dialect() == dialect.MySQL {
+		exists.ForUpdate()
+	}
+	query, args := u.builder.SelectExpr(sql.Exists(exists)).Query()
+	rows := &sql.Rows{}
+	if err := u.tx.Query(ctx, query, args, rows); err != nil {
+		return err
+	}
+	defer rows.Close()
+	found, err := sql.ScanBool(rows)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return &NotFoundError{table: u.Node.Table, id: u.Node.ID.Value}
+	}
+	return nil
+}
+
 type creator struct {
 	graph
 	*CreateSpec
-	*BatchCreateSpec
 }
 
 func (c *creator) node(ctx context.Context, drv dialect.Driver) error {
@@ -881,6 +1419,16 @@ func (c *creator) node(ctx context.Context, drv dialect.Driver) error {
 		return err
 	}
 	if err := func() error {
+		// In case the spec does not contain an ID field, we assume
+		// we interact with an edge-schema with composite primary key.
+		if c.ID == nil {
+			c.ensureConflict(insert)
+			query, args, err := insert.QueryErr()
+			if err != nil {
+				return err
+			}
+			return c.tx.Exec(ctx, query, args, nil)
+		}
 		if err := c.insert(ctx, insert); err != nil {
 			return err
 		}
@@ -907,7 +1455,63 @@ func (c *creator) mayTx(ctx context.Context, drv dialect.Driver, edges map[Rel][
 	return tx, nil
 }
 
-func (c *creator) nodes(ctx context.Context, tx dialect.ExecQuerier) error {
+// setTableColumns sets the table columns and foreign_keys used in insert.
+func (c *creator) setTableColumns(insert *sql.InsertBuilder, edges map[Rel][]*EdgeSpec) error {
+	err := setTableColumns(c.Fields, edges, func(column string, value driver.Value) {
+		insert.Set(column, value)
+	})
+	return err
+}
+
+// insert a node to its table and sets its ID if it was not provided by the user.
+func (c *creator) insert(ctx context.Context, insert *sql.InsertBuilder) error {
+	c.ensureConflict(insert)
+	// If the id field was provided by the user.
+	if c.ID.Value != nil {
+		insert.Set(c.ID.Column, c.ID.Value)
+		// In case of "ON CONFLICT", the record may exist in the
+		// database, and we need to get back the database id field.
+		if len(c.CreateSpec.OnConflict) == 0 {
+			query, args, err := insert.QueryErr()
+			if err != nil {
+				return err
+			}
+			return c.tx.Exec(ctx, query, args, nil)
+		}
+	}
+	return c.insertLastID(ctx, insert.Returning(c.ID.Column))
+}
+
+// ensureConflict ensures the ON CONFLICT is added to the insert statement.
+func (c *creator) ensureConflict(insert *sql.InsertBuilder) {
+	if opts := c.CreateSpec.OnConflict; len(opts) > 0 {
+		insert.OnConflict(opts...)
+		c.ensureLastInsertID(insert)
+	}
+}
+
+// ensureLastInsertID ensures the LAST_INSERT_ID was added to the
+// 'ON DUPLICATE ... UPDATE' clause in it was not provided.
+func (c *creator) ensureLastInsertID(insert *sql.InsertBuilder) {
+	if c.ID == nil || !c.ID.Type.Numeric() || c.ID.Value != nil || insert.Dialect() != dialect.MySQL {
+		return
+	}
+	insert.OnConflict(sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, column := range s.UpdateColumns() {
+			if column == c.ID.Column {
+				return
+			}
+		}
+		s.Set(c.ID.Column, sql.Expr(fmt.Sprintf("LAST_INSERT_ID(%s)", s.Table().C(c.ID.Column))))
+	}))
+}
+
+type batchCreator struct {
+	graph
+	*BatchCreateSpec
+}
+
+func (c *batchCreator) nodes(ctx context.Context, drv dialect.Driver) error {
 	if len(c.Nodes) == 0 {
 		return nil
 	}
@@ -918,7 +1522,7 @@ func (c *creator) nodes(ctx context.Context, tx dialect.ExecQuerier) error {
 			return fmt.Errorf("more than 1 table for batch insert: %q != %q", node.Table, c.Nodes[i-1].Table)
 		}
 		values[i] = make(map[string]driver.Value)
-		if node.ID.Value != nil {
+		if node.ID != nil && node.ID.Value != nil {
 			columns[node.ID.Column] = struct{}{}
 			values[i][node.ID.Column] = node.ID.Value
 		}
@@ -933,13 +1537,13 @@ func (c *creator) nodes(ctx context.Context, tx dialect.ExecQuerier) error {
 	}
 	for column := range columns {
 		for i := range values {
-			switch _, exists := values[i][column]; {
-			case column == c.Nodes[i].ID.Column && !exists:
-				// If the ID value was provided to one of the nodes, it should be
-				// provided to all others because this affects the way we calculate
-				// their values in MySQL and SQLite dialects.
-				return fmt.Errorf("incosistent id values for batch insert")
-			case !exists:
+			if _, exists := values[i][column]; !exists {
+				if c.Nodes[i].ID != nil && column == c.Nodes[i].ID.Column {
+					// If the ID value was provided to one of the nodes, it should be
+					// provided to all others because this affects the way we calculate
+					// their values in MySQL and SQLite dialects.
+					return fmt.Errorf("inconsistent id values for batch insert")
+				}
 				// Assign NULL values for empty placeholders.
 				values[i][column] = nil
 			}
@@ -948,79 +1552,69 @@ func (c *creator) nodes(ctx context.Context, tx dialect.ExecQuerier) error {
 	sorted := keys(columns)
 	insert := c.builder.Insert(c.Nodes[0].Table).Schema(c.Nodes[0].Schema).Default().Columns(sorted...)
 	for i := range values {
-		vs := make([]interface{}, len(sorted))
+		vs := make([]any, len(sorted))
 		for j, c := range sorted {
 			vs[j] = values[i][c]
 		}
 		insert.Values(vs...)
 	}
-	if err := c.batchInsert(ctx, tx, insert); err != nil {
-		return fmt.Errorf("insert nodes to table %q: %w", c.Nodes[0].Table, err)
-	}
-	if err := c.batchAddM2M(ctx, c.BatchCreateSpec); err != nil {
+	tx, err := c.mayTx(ctx, drv)
+	if err != nil {
 		return err
 	}
-	// FKs that exist in different tables can't be updated in batch (using the CASE
-	// statement), because we rely on RowsAffected to check if the FK column is NULL.
-	for _, node := range c.Nodes {
-		edges := EdgeSpecs(node.Edges).GroupRel()
-		if err := c.graph.addFKEdges(ctx, []driver.Value{node.ID.Value}, append(edges[O2M], edges[O2O]...)); err != nil {
+	c.tx = tx
+	if err := func() error {
+		// In case the spec does not contain an ID field, we assume
+		// we interact with an edge-schema with composite primary key.
+		if c.Nodes[0].ID == nil {
+			c.ensureConflict(insert)
+			query, args := insert.Query()
+			return tx.Exec(ctx, query, args, nil)
+		}
+		if err := c.batchInsert(ctx, tx, insert); err != nil {
+			return fmt.Errorf("insert nodes to table %q: %w", c.Nodes[0].Table, err)
+		}
+		if err := c.batchAddM2M(ctx, c.BatchCreateSpec); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// setTableColumns sets the table columns and foreign_keys used in insert.
-func (c *creator) setTableColumns(insert *sql.InsertBuilder, edges map[Rel][]*EdgeSpec) error {
-	err := setTableColumns(c.Fields, edges, func(column string, value driver.Value) {
-		insert.Set(column, value)
-	})
-	return err
-}
-
-// insert inserts the node to its table and sets its ID if it wasn't provided by the user.
-func (c *creator) insert(ctx context.Context, insert *sql.InsertBuilder) error {
-	if opts := c.CreateSpec.OnConflict; len(opts) > 0 {
-		insert.OnConflict(opts...)
-		c.ensureLastInsertID(insert)
-	}
-	var res sql.Result
-	// If the id field was provided by the user.
-	if c.ID.Value != nil {
-		insert.Set(c.ID.Column, c.ID.Value)
-		// In case of "ON CONFLICT", the record may exists in the
-		// database, and we need to get back the database id field.
-		if len(c.CreateSpec.OnConflict) == 0 {
-			query, args := insert.Query()
-			return c.tx.Exec(ctx, query, args, &res)
-		}
-	}
-	return c.insertLastID(ctx, insert.Returning(c.ID.Column))
-}
-
-// ensureLastInsertID ensures the LAST_INSERT_ID was added to the
-// 'ON DUPLICATE .. UPDATE' clause in it was not provided.
-func (c *creator) ensureLastInsertID(insert *sql.InsertBuilder) {
-	if !c.ID.Type.Numeric() || c.ID.Value != nil || insert.Dialect() != dialect.MySQL {
-		return
-	}
-	insert.OnConflict(sql.ResolveWith(func(s *sql.UpdateSet) {
-		for _, column := range s.UpdateColumns() {
-			if column == c.ID.Column {
-				return
+		// FKs that exist in different tables can't be updated in batch (using the CASE
+		// statement), because we rely on RowsAffected to check if the FK column is NULL.
+		for _, node := range c.Nodes {
+			edges := EdgeSpecs(node.Edges).GroupRel()
+			if err := c.graph.addFKEdges(ctx, []driver.Value{node.ID.Value}, append(edges[O2M], edges[O2O]...)); err != nil {
+				return err
 			}
 		}
-		s.Set(c.ID.Column, sql.Expr(fmt.Sprintf("LAST_INSERT_ID(%s)", s.Table().C(c.ID.Column))))
-	}))
+		return nil
+	}(); err != nil {
+		return rollback(tx, err)
+	}
+	return tx.Commit()
+}
+
+// mayTx opens a new transaction if the create operation spans across multiple statements.
+func (c *batchCreator) mayTx(ctx context.Context, drv dialect.Driver) (dialect.Tx, error) {
+	for _, node := range c.Nodes {
+		for _, edge := range node.Edges {
+			if isExternalEdge(edge) {
+				return drv.Tx(ctx)
+			}
+		}
+	}
+	return dialect.NopTx(drv), nil
 }
 
 // batchInsert inserts a batch of nodes to their table and sets their ID if it was not provided by the user.
-func (c *creator) batchInsert(ctx context.Context, tx dialect.ExecQuerier, insert *sql.InsertBuilder) error {
+func (c *batchCreator) batchInsert(ctx context.Context, tx dialect.ExecQuerier, insert *sql.InsertBuilder) error {
+	c.ensureConflict(insert)
+	return c.insertLastIDs(ctx, tx, insert.Returning(c.Nodes[0].ID.Column))
+}
+
+// ensureConflict ensures the ON CONFLICT is added to the insert statement.
+func (c *batchCreator) ensureConflict(insert *sql.InsertBuilder) {
 	if opts := c.BatchCreateSpec.OnConflict; len(opts) > 0 {
 		insert.OnConflict(opts...)
 	}
-	return c.insertLastIDs(ctx, tx, insert.Returning(c.Nodes[0].ID.Column))
 }
 
 // GroupRel groups edges by their relation type.
@@ -1065,12 +1659,9 @@ type graph struct {
 }
 
 func (g *graph) clearM2MEdges(ctx context.Context, ids []driver.Value, edges EdgeSpecs) error {
-	var (
-		res sql.Result
-		// Remove all M2M edges from the same type at once.
-		// The EdgeSpec is the same for all members in a group.
-		tables = edges.GroupTable()
-	)
+	// Remove all M2M edges from the same type at once.
+	// The EdgeSpec is the same for all members in a group.
+	tables := edges.GroupTable()
 	for _, table := range edgeKeys(tables) {
 		edges := tables[table]
 		preds := make([]*sql.Predicate, 0, len(edges))
@@ -1101,7 +1692,7 @@ func (g *graph) clearM2MEdges(ctx context.Context, ids []driver.Value, edges Edg
 			deleter.Schema(edges[0].Schema)
 		}
 		query, args := deleter.Query()
-		if err := g.tx.Exec(ctx, query, args, &res); err != nil {
+		if err := g.tx.Exec(ctx, query, args, nil); err != nil {
 			return fmt.Errorf("remove m2m edge for table %s: %w", table, err)
 		}
 	}
@@ -1109,15 +1700,22 @@ func (g *graph) clearM2MEdges(ctx context.Context, ids []driver.Value, edges Edg
 }
 
 func (g *graph) addM2MEdges(ctx context.Context, ids []driver.Value, edges EdgeSpecs) error {
-	var (
-		res sql.Result
-		// Insert all M2M edges from the same type at once.
-		// The EdgeSpec is the same for all members in a group.
-		tables = edges.GroupTable()
-	)
+	// Insert all M2M edges from the same type at once.
+	// The EdgeSpec is the same for all members in a group.
+	tables := edges.GroupTable()
 	for _, table := range edgeKeys(tables) {
-		edges := tables[table]
-		insert := g.builder.Insert(table).Columns(edges[0].Columns...)
+		var (
+			edges   = tables[table]
+			columns = edges[0].Columns
+			values  = make([]any, 0, len(edges[0].Target.Fields))
+		)
+		// Additional fields, such as edge-schema fields. Note, we use the first index,
+		// because Ent generates the same spec fields for all edges from the same type.
+		for _, f := range edges[0].Target.Fields {
+			values = append(values, f.Value)
+			columns = append(columns, f.Column)
+		}
+		insert := g.builder.Insert(table).Columns(columns...)
 		if edges[0].Schema != "" {
 			// If the Schema field was provided to the EdgeSpec (by the
 			// generated code), it should be the same for all EdgeSpecs.
@@ -1129,14 +1727,19 @@ func (g *graph) addM2MEdges(ctx context.Context, ids []driver.Value, edges EdgeS
 				pk1, pk2 = pk2, pk1
 			}
 			for _, pair := range product(pk1, pk2) {
-				insert.Values(pair[0], pair[1])
+				insert.Values(append([]any{pair[0], pair[1]}, values...)...)
 				if edge.Bidi {
-					insert.Values(pair[1], pair[0])
+					insert.Values(append([]any{pair[1], pair[0]}, values...)...)
 				}
 			}
 		}
+		// Ignore conflicts only if edges do not contain extra fields, because these fields
+		// can hold different values on different insertions (e.g. time.Now() or uuid.New()).
+		if len(edges[0].Target.Fields) == 0 {
+			insert.OnConflict(sql.DoNothing())
+		}
 		query, args := insert.Query()
-		if err := g.tx.Exec(ctx, query, args, &res); err != nil {
+		if err := g.tx.Exec(ctx, query, args, nil); err != nil {
 			return fmt.Errorf("add m2m edge for table %s: %w", table, err)
 		}
 	}
@@ -1147,39 +1750,46 @@ func (g *graph) batchAddM2M(ctx context.Context, spec *BatchCreateSpec) error {
 	tables := make(map[string]*sql.InsertBuilder)
 	for _, node := range spec.Nodes {
 		edges := EdgeSpecs(node.Edges).FilterRel(M2M)
-		for t, edges := range edges.GroupTable() {
-			insert, ok := tables[t]
-			if !ok {
-				insert = g.builder.Insert(t).Columns(edges[0].Columns...)
-				if edges[0].Schema != "" {
-					// If the Schema field was provided to the EdgeSpec (by the
-					// generated code), it should be the same for all EdgeSpecs.
-					insert.Schema(edges[0].Schema)
-				}
-			}
-			tables[t] = insert
+		for name, edges := range edges.GroupTable() {
 			if len(edges) != 1 {
 				return fmt.Errorf("expect exactly 1 edge-spec per table, but got %d", len(edges))
 			}
 			edge := edges[0]
+			insert, ok := tables[name]
+			if !ok {
+				columns := edge.Columns
+				// Additional fields, such as edge-schema fields.
+				for _, f := range edge.Target.Fields {
+					columns = append(columns, f.Column)
+				}
+				insert = g.builder.Insert(name).Columns(columns...)
+				if edge.Schema != "" {
+					// If the Schema field was provided to the EdgeSpec (by the
+					// generated code), it should be the same for all EdgeSpecs.
+					insert.Schema(edge.Schema)
+				}
+				// Ignore conflicts only if edges do not contain extra fields, because these fields
+				// can hold different values on different insertions (e.g. time.Now() or uuid.New()).
+				if len(edge.Target.Fields) == 0 {
+					insert.OnConflict(sql.DoNothing())
+				}
+			}
+			tables[name] = insert
 			pk1, pk2 := []driver.Value{node.ID.Value}, edge.Target.Nodes
 			if edge.Inverse {
 				pk1, pk2 = pk2, pk1
 			}
 			for _, pair := range product(pk1, pk2) {
-				insert.Values(pair[0], pair[1])
+				insert.Values(append([]any{pair[0], pair[1]}, edge.Target.FieldValues()...)...)
 				if edge.Bidi {
-					insert.Values(pair[1], pair[0])
+					insert.Values(append([]any{pair[1], pair[0]}, edge.Target.FieldValues()...)...)
 				}
 			}
 		}
 	}
 	for _, table := range insertKeys(tables) {
-		var (
-			res         sql.Result
-			query, args = tables[table].Query()
-		)
-		if err := g.tx.Exec(ctx, query, args, &res); err != nil {
+		query, args := tables[table].Query()
+		if err := g.tx.Exec(ctx, query, args, nil); err != nil {
 			return fmt.Errorf("add m2m edge for table %s: %w", table, err)
 		}
 	}
@@ -1198,11 +1808,11 @@ func (g *graph) clearFKEdges(ctx context.Context, ids []driver.Value, edges []*E
 			pred = matchIDs(edge.Target.IDSpec.Column, edge.Target.Nodes, edge.Columns[0], ids)
 		}
 		query, args := g.builder.Update(edge.Table).
+			Schema(edge.Schema).
 			SetNull(edge.Columns[0]).
 			Where(pred).
 			Query()
-		var res sql.Result
-		if err := g.tx.Exec(ctx, query, args, &res); err != nil {
+		if err := g.tx.Exec(ctx, query, args, nil); err != nil {
 			return fmt.Errorf("add %s edge for table %s: %w", edge.Rel, edge.Table, err)
 		}
 	}
@@ -1212,8 +1822,8 @@ func (g *graph) clearFKEdges(ctx context.Context, ids []driver.Value, edges []*E
 func (g *graph) addFKEdges(ctx context.Context, ids []driver.Value, edges []*EdgeSpec) error {
 	id := ids[0]
 	if len(ids) > 1 && len(edges) != 0 {
-		// O2M and O2O edges are defined by a FK in the "other" table.
-		// Therefore, ids[i+1] will override ids[i] which is invalid.
+		// O2M and non-inverse O2O edges are defined by a FK in the "other"
+		// table. Therefore, ids[i+1] will override ids[i] which is invalid.
 		return fmt.Errorf("unable to link FK edge to more than 1 node: %v", ids)
 	}
 	for _, edge := range edges {
@@ -1239,8 +1849,8 @@ func (g *graph) addFKEdges(ctx context.Context, ids []driver.Value, edges []*Edg
 		if err != nil {
 			return err
 		}
-		// Setting the FK value of the "other" table
-		// without clearing it before, is not allowed.
+		// Setting the FK value of the "other" table without clearing it before, is not allowed.
+		// Including no-op (same id), because we rely on "affected" to determine if the FK set.
 		if ids := edge.Target.Nodes; int(affected) < len(ids) {
 			return &ConstraintError{msg: fmt.Sprintf("one of %v is already connected to a different %s", ids, edge.Columns[0])}
 		}
@@ -1263,6 +1873,12 @@ func hasExternalEdges(addEdges, clearEdges map[Rel][]*EdgeSpec) bool {
 		}
 	}
 	return false
+}
+
+// isExternalEdge reports if the given edge requires an UPDATE
+// or an INSERT to other table.
+func isExternalEdge(e *EdgeSpec) bool {
+	return e.Rel == M2M || e.Rel == O2M || e.Rel == O2O && !e.Inverse
 }
 
 // setTableColumns is shared between updater and creator.
@@ -1293,8 +1909,8 @@ func setTableColumns(fields []*FieldSpec, edges map[Rel][]*EdgeSpec, set func(st
 
 // insertLastID invokes the insert query on the transaction and returns the LastInsertID.
 func (c *creator) insertLastID(ctx context.Context, insert *sql.InsertBuilder) error {
-	query, args := insert.Query()
-	if err := insert.Err(); err != nil {
+	query, args, err := insert.QueryErr()
+	if err != nil {
 		return err
 	}
 	// MySQL does not support the "RETURNING" clause.
@@ -1340,9 +1956,9 @@ func (c *creator) insertLastID(ctx context.Context, insert *sql.InsertBuilder) e
 }
 
 // insertLastIDs invokes the batch insert query on the transaction and returns the LastInsertID of all entities.
-func (c *creator) insertLastIDs(ctx context.Context, tx dialect.ExecQuerier, insert *sql.InsertBuilder) error {
-	query, args := insert.Query()
-	if err := insert.Err(); err != nil {
+func (c *batchCreator) insertLastIDs(ctx context.Context, tx dialect.ExecQuerier, insert *sql.InsertBuilder) error {
+	query, args, err := insert.QueryErr()
+	if err != nil {
 		return err
 	}
 	// MySQL does not support the "RETURNING" clause.
@@ -1354,7 +1970,14 @@ func (c *creator) insertLastIDs(ctx context.Context, tx dialect.ExecQuerier, ins
 		defer rows.Close()
 		for i := 0; rows.Next(); i++ {
 			node := c.Nodes[i]
-			if node.ID.Type.Numeric() {
+			switch _, ok := node.ID.Value.(field.ValueScanner); {
+			case ok:
+				// If the ID implements the sql.Scanner
+				// interface it should be a pointer type.
+				if err := rows.Scan(node.ID.Value); err != nil {
+					return err
+				}
+			case node.ID.Type.Numeric():
 				// Normalize the type to int64 to make it looks
 				// like LastInsertId.
 				var id int64
@@ -1362,11 +1985,13 @@ func (c *creator) insertLastIDs(ctx context.Context, tx dialect.ExecQuerier, ins
 					return err
 				}
 				node.ID.Value = id
-			} else if err := rows.Scan(&node.ID.Value); err != nil {
-				return err
+			default:
+				if err := rows.Scan(&node.ID.Value); err != nil {
+					return err
+				}
 			}
 		}
-		return nil
+		return rows.Err()
 	}
 	// MySQL.
 	var res sql.Result

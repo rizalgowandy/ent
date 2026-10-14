@@ -4,6 +4,8 @@ This source code is licensed under the Apache 2.0 license found
 in the LICENSE file in the root directory of this source tree.
 */}}
 
+{{/* gotype: entgo.io/ent/entc/gen.Graph */}}
+
 {{- define "dialect/sql/internal/schemaconfig" -}}
 {{ with extend $ "Package" "internal" -}}
 	{{ template "header" . }}
@@ -16,6 +18,7 @@ type SchemaConfig struct {
 	{{- range $n := $.Nodes }}
 		{{ $n.Name }} string // {{ $n.Name }} table.
 		{{- range $e := $n.Edges }}
+			{{- /* Skip adding join-table in case the edge is inverse or already defined as an edge-schema. */}}
 			{{- if and $e.M2M (not $e.Inverse) }}
 				{{ $n.Name }}{{ $e.StructField }} string // {{ $n.Name }}-{{ $e.Name }}->{{ $e.Type.Name }} table.
 			{{- end }}
@@ -38,21 +41,22 @@ func NewSchemaConfigContext(parent context.Context, config SchemaConfig) context
 
 {{- end }}
 
-{{/* Addtional imports by the schemaconfig feature. */}}
+{{/* Additional imports by the schemaconfig feature. */}}
 {{- define "dialect/sql/import/additional/schemaconfig" -}}
 	{{- if $.FeatureEnabled "sql/schemaconfig" }}
 		"{{ $.Config.Package }}/internal"
 	{{- end }}
 {{- end }}
 
-{{/* Addtional fields to the config struct. */}}
+{{/* Additional fields to the config struct. */}}
 {{- define "dialect/sql/config/fields/schemaconfig" -}}
-	{{- if $.FeatureEnabled "sql/schemaconfig" }}
+	{{- if $.FeatureEnabled "sql/schemaconfig" -}}
+		// schemaConfig contains alternative names for all tables.
 		schemaConfig SchemaConfig
 	{{- end }}
 {{- end -}}
 
-{{/* Addtional top-level code for the generated config.go file. */}}
+{{/* Additional top-level code for the generated config.go file. */}}
 {{- define "dialect/sql/config/options/schemaconfig" }}
 	{{- if $.FeatureEnabled "sql/schemaconfig" }}
 		// SchemaConfig represents alternative schema names for all tables
@@ -87,8 +91,8 @@ func NewSchemaConfigContext(parent context.Context, config SchemaConfig) context
 	{{- template "dialect/sql/spec/ctxschemaconfig" . }}
 {{- end }}
 
-{{- define "dialect/sql/query/eagerloading/spec/schemaconfig" }}
-	{{- with extend $ "Ident" "_spec.Edge" }}
+{{- define "dialect/sql/query/eagerloading/join/schemaconfig" }}
+	{{- with extend $ "Ident" "joinT" "CallSet" true }}
 		{{- template "dialect/sql/defedge/spec/schemaconfig" . }}
 	{{- end }}
 {{- end }}
@@ -96,27 +100,33 @@ func NewSchemaConfigContext(parent context.Context, config SchemaConfig) context
 {{- define "dialect/sql/defedge/spec/schemaconfig" }}
 	{{- $e := $.Scope.Edge }}
 	{{- $builder := pascal $.Scope.Builder }}
-	{{- $receiver := receiver $builder }}
+	{{- $receiver := $.Scope.Receiver }}
 	{{- $ident := "edge" }}{{ with $.Scope.Ident }}{{ $ident = . }}{{ end }}
 	{{- if $.FeatureEnabled "sql/schemaconfig" }}
 		{{- $schema := $e.Type.Name }}
 		{{- if $e.OwnFK }}
 			{{- $schema = $.Name }}
 		{{- else if $e.M2M }}
-			{{- if $e.Inverse }}
+			{{- if $e.Through }}
+				{{- $schema = $e.Through.Name }}
+			{{- else if $e.Inverse }}
 				{{- $schema = print $e.Type.Name (pascal $e.Inverse) }}
 			{{- else }}
 				{{- $schema = print $.Name $e.StructField }}
 			{{- end }}
 		{{- end }}
-		{{ $ident }}.Schema = {{ $receiver }}.schemaConfig.{{ $schema }}
+		{{- if $.Scope.CallSet }}
+			{{ $ident }}.Schema({{ $receiver }}.schemaConfig.{{ $schema }})
+		{{- else }}
+			{{ $ident }}.Schema = {{ $receiver }}.schemaConfig.{{ $schema }}
+		{{- end }}
 	{{- end }}
 {{- end }}
 
 {{/* A template for injecting the SchemaConfig to the context. Should be executed before other templates. */}}
 {{- define "dialect/sql/spec/ctxschemaconfig" -}}
 	{{- $builder := pascal $.Scope.Builder }}
-	{{- $receiver := receiver $builder }}
+	{{- $receiver := $.Scope.Receiver }}
 	{{- $ident := "_spec.Node" }}{{ with $.Scope.Ident }}{{ $ident = . }}{{ end }}
 	{{- if $.FeatureEnabled "sql/schemaconfig" }}
 		{{ $ident }}.Schema = {{ $receiver }}.schemaConfig.{{ $.Name }}
@@ -128,7 +138,7 @@ func NewSchemaConfigContext(parent context.Context, config SchemaConfig) context
 
 {{- define "dialect/sql/query/selector/ctxschemaconfig" -}}
 	{{- $builder := pascal $.Scope.Builder }}
-	{{- $receiver := receiver $builder }}
+	{{- $receiver := $.Scope.Receiver }}
 	{{- if $.FeatureEnabled "sql/schemaconfig" }}
 		t1.Schema({{ $receiver }}.schemaConfig.{{ $.Name }})
 		ctx = internal.NewSchemaConfigContext(ctx, {{ $receiver }}.schemaConfig)
@@ -172,7 +182,9 @@ func NewSchemaConfigContext(parent context.Context, config SchemaConfig) context
 	{{- if $e.OwnFK }}
 		{{- $schema = $.Name }}
 	{{- else if $e.M2M }}
-		{{- if $e.Inverse }}
+		{{- if $e.Through }}
+			{{- $schema = $e.Through.Name }}
+		{{- else if $e.Inverse }}
 			{{- $schema = print $e.Type.Name (pascal $e.Inverse) }}
 		{{- else }}
 			{{- $schema = print $.Name $e.StructField }}
@@ -180,3 +192,29 @@ func NewSchemaConfigContext(parent context.Context, config SchemaConfig) context
 	{{- end }}
 	step.Edge.Schema = schemaConfig.{{ $schema }}
 {{- end -}}
+
+{{- define "config/init/fields/multischema" }}
+	{{- if $.FeatureEnabled "sql/multischema" }}
+		cfg.schemaConfig = DefaultSchemaConfig
+	{{- end }}
+{{- end }}
+
+{{- define "dialect/sql/config/options/multischema" }}
+	{{- if $.FeatureEnabled "sql/multischema" }}
+		{{- $all := $.TableSchemas }}
+		var (
+			// DefaultSchemaConfig represents the default schema names for all tables as defined in ent/schema.
+			DefaultSchemaConfig = SchemaConfig {
+				{{- range $n := $.Nodes }}
+					{{ $n.Name }}: tableSchemas[{{ indexOf $all $n.TableSchema }}],
+					{{- range $e := $n.Edges }}
+							{{- if and $e.M2M (not $e.Inverse) (not $e.Through) }}
+								{{ $n.Name }}{{ $e.StructField }}: tableSchemas[{{ indexOf $all $e.TableSchema }}],
+							{{- end }}
+					{{- end }}
+				{{- end }}
+			}
+			tableSchemas = [...]string{ {{- range $i, $s := $all }}{{ if $i }},{{ end }}"{{ $s }}"{{ end }} }
+		)
+	{{- end }}
+{{- end }}

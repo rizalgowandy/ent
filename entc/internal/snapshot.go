@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"entgo.io/ent/entc/gen"
@@ -128,7 +129,7 @@ func merge(local, other *gen.Snapshot) {
 		switch match, ok := locals[schema.Name]; {
 		case !ok:
 			local.Schemas = append(local.Schemas, schema)
-		case ok:
+		default:
 			mergeSchema(match, schema)
 		}
 	}
@@ -151,7 +152,7 @@ func mergeSchema(local, other *load.Schema) {
 		local.Config.Table = other.Config.Table
 	}
 	if local.Annotations == nil && other.Annotations != nil {
-		local.Annotations = make(map[string]interface{})
+		local.Annotations = make(map[string]any)
 	}
 	for ant := range other.Annotations {
 		if _, ok := local.Annotations[ant]; !ok {
@@ -166,7 +167,7 @@ func mergeSchema(local, other *load.Schema) {
 		switch match, ok := fields[f.Name]; {
 		case !ok:
 			local.Fields = append(local.Fields, f)
-		case ok:
+		default:
 			mergeField(match, f)
 		}
 	}
@@ -178,7 +179,7 @@ func mergeSchema(local, other *load.Schema) {
 		switch match, ok := edges[e.Name]; {
 		case !ok:
 			local.Edges = append(local.Edges, e)
-		case ok:
+		default:
 			mergeEdge(match, e)
 		}
 	}
@@ -188,7 +189,7 @@ func mergeSchema(local, other *load.Schema) {
 // the "other" field, that may be necessary for code-generation.
 func mergeField(local, other *load.Field) {
 	if local.Annotations == nil && other.Annotations != nil {
-		local.Annotations = make(map[string]interface{})
+		local.Annotations = make(map[string]any)
 	}
 	for ant := range other.Annotations {
 		if _, ok := local.Annotations[ant]; !ok {
@@ -204,7 +205,7 @@ func mergeField(local, other *load.Field) {
 // the "other" edge, that may be necessary for code-generation.
 func mergeEdge(local, other *load.Edge) {
 	if local.Annotations == nil && other.Annotations != nil {
-		local.Annotations = make(map[string]interface{})
+		local.Annotations = make(map[string]any)
 	}
 	for ant := range other.Annotations {
 		if _, ok := local.Annotations[ant]; !ok {
@@ -233,10 +234,14 @@ func IsBuildError(err error) bool {
 }
 
 func trim(line []byte) ([]byte, error) {
-	start := bytes.IndexByte(line, '`')
-	end := bytes.LastIndexByte(line, '`')
+	start := bytes.IndexByte(line, '"')
+	end := bytes.LastIndexByte(line, '"')
 	if start == -1 || start >= end {
 		return nil, fmt.Errorf("unexpected snapshot line %s", line)
 	}
-	return line[start+1 : end], nil
+	l, err := strconv.Unquote(string(line[start : end+1]))
+	if err != nil {
+		return nil, err
+	}
+	return []byte(l), nil
 }

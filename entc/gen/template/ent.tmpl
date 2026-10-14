@@ -11,15 +11,11 @@ in the LICENSE file in the root directory of this source tree.
 {{ $pkg := base $.Config.Package }}
 {{ template "header" $ }}
 
-{{ template "import" $ }}
+{{ with extend $ "Imports" $.SiblingImports }}
+	{{ template "import" . }}
+{{ end }}
 
-import (
-	{{- range $path := $.SiblingImports }}
-		"{{ $path }}"
-	{{- end }}
-)
-
-// {{ $.Name }} is the model entity for the {{ $.Name }} schema.
+{{ template "model/comment" $ }}
 {{- with $tmpls := matchTemplate "model/comment/additional/*" }}
 	{{- range $tmpl := $tmpls }}
 		{{- xtemplate $tmpl $ }}
@@ -27,14 +23,17 @@ import (
 {{- end }}
 type {{ $.Name }} struct {
 	config {{ template "model/omittags" $ }}
-	// ID of the ent.
-	{{- if $.ID.Comment }}
-		{{- range $line := split $.ID.Comment "\n" }}
-			// {{ $line }}
+	{{- if $.HasOneFieldID }}
+		// ID of the ent.
+		{{- if $.ID.Comment }}
+			{{- range $line := split $.ID.Comment "\n" }}
+				// {{ $line }}
+			{{- end }}
 		{{- end }}
+		ID {{ $.ID.Type }} {{ with $.Annotations.Fields.StructTag.id }}`{{ . }}`{{ else }}`{{ $.ID.StructTag }}`{{ end }}
 	{{- end }}
-	ID {{ $.ID.Type }} {{ with $.Annotations.Fields.StructTag.id }}`{{ . }}`{{ else }}`{{ $.ID.StructTag }}`{{ end }}
 	{{- range $f := $.Fields }}
+		{{- if $f.IsBlobLazy }}{{ continue }}{{ end }}
 		{{- $tag := $f.StructTag }}{{ with $tags := $.Annotations.Fields.StructTag }}{{ with index $tags $f.Name }}{{ $tag = . }}{{ end }}{{ end }}
 		{{- template "model/fieldcomment" $f }}
 		{{ $f.StructField }} {{ if $f.NillableValue }}*{{ end }}{{ $f.Type }} {{ if not $f.Sensitive }}`{{ $tag }}`{{ else }}{{ template "model/omittags" $ }}{{ end }}
@@ -50,35 +49,40 @@ type {{ $.Name }} struct {
 		{{- xtemplate $tmpl . }}
 	{{- end }}
 	{{- /* Additional fields to add by the user. */}}
-	{{ template "model/fields/additional" $ }}
+	{{- template "model/fields/additional" $ }}
 }
 
 {{- with $.Edges }}
+{{- $edgesType := print $.Name "Edges"}}
 // {{ $.Name }}Edges holds the relations/edges for other nodes in the graph.
-type {{ $.Name }}Edges struct {
+type {{ $edgesType }} struct {
 	{{- range $e := . }}
-		// {{ $e.StructField }} holds the value of the {{ $e.Name }} edge.
+		{{- template "model/edgecomment" $e }}
 		{{ $e.StructField }} {{ if not $e.Unique }}[]{{ end }}*{{ $e.Type.Name }} {{ with $e.StructTag }}`{{ . }}`{{ end }}
 	{{- end }}
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
 	loadedTypes [{{ len . }}]bool
+	{{- /* Additional fields to add by the user. */}}
+	{{- template "model/edges/fields/additional" $ }}
 }
 
 {{- range $i, $e := . }}
 	// {{ $e.StructField }}OrErr returns the {{ $e.StructField }} value or an error if the edge
 	// was not loaded in eager-loading{{ if $e.Unique }}, or loaded but was not found{{ end }}.
-	func (e {{ $.Name }}Edges) {{ $e.StructField }}OrErr() ({{ if not $e.Unique }}[]{{ end }}*{{ $e.Type.Name }}, error) {
-		if e.loadedTypes[{{ $i }}] {
-			{{- if $e.Unique }}
-				if e.{{ $e.StructField }} == nil {
-					// The edge {{ $e.Name }} was loaded in eager-loading,
-					// but was not found.
-					return nil, &NotFoundError{label: {{ $e.Type.Package }}.Label}
-				}
-			{{- end }}
-			return e.{{ $e.StructField }}, nil
-		}
+	func (e {{ $edgesType }}) {{ $e.StructField }}OrErr() ({{ if not $e.Unique }}[]{{ end }}*{{ $e.Type.Name }}, error) {
+		{{- if $e.Unique }}
+			if e.{{ $e.StructField }} != nil {
+				return e.{{ $e.StructField }}, nil
+			} else if e.loadedTypes[{{ $i }}] {
+				{{- /* Edge was loaded but was not found. */}}
+				return nil, &NotFoundError{label: {{ $e.Type.Package }}.Label}
+			}
+		{{- else }}
+			if e.loadedTypes[{{ $i }}] {
+				return e.{{ $e.StructField }}, nil
+			}
+		{{- end }}
 		return nil, &NotLoadedError{edge: "{{ $e.Name }}"}
 	}
 {{- end }}
@@ -93,25 +97,48 @@ type {{ $.Name }}Edges struct {
 	{{ $func := print "Query" $e.StructField }}
 	// {{ $func }} queries the "{{ $e.Name }}" edge of the {{ $.Name }} entity.
 	func ({{ $receiver }} *{{ $.Name }}) {{ $func }}() *{{ $e.Type.QueryName }} {
-		return (&{{ $.Name }}Client{config: {{ $receiver }}.config}).{{ $func }}({{ $receiver }})
+		return New{{ $.ClientName }}({{ $receiver }}.config).{{ $func }}({{ $receiver }})
 	}
 {{ end }}
 
+{{- $blobModelTmpl := printf "dialect/%s/model/fields" $.Storage }}
+{{- if hasTemplate $blobModelTmpl }}
+{{- range $f := $.BlobFields }}
+	// {{ $f.StructField }}Reader opens a reader for the "{{ $f.Name }}" field from blob storage.
+	// The caller must close the returned reader when done.
+	func ({{ $receiver }} *{{ $.Name }}) {{ $f.StructField }}Reader(ctx context.Context) (io.ReadCloser, error) {
+		if {{ $receiver }}.{{ $f.BlobKeyColumn }} == nil || *{{ $receiver }}.{{ $f.BlobKeyColumn }} == "" {
+			return nil, fmt.Errorf("{{ $pkg }}: {{ $.Name }}.{{ $f.BlobKeyColumn }} is nil or empty")
+		}
+		if {{ $receiver }}.blobOpeners.{{ $.Name }} == nil {
+			return nil, fmt.Errorf("{{ $pkg }}: blob storage not configured (missing WithBlobOpeners)")
+		}
+		b, err := {{ $receiver }}.blobOpeners.{{ $.Name }}(ctx, {{ $.Package }}.{{ $f.Constant }})
+		if err != nil {
+			return nil, err
+		}
+		return ent.BlobReader(ctx, b, *{{ $receiver }}.{{ $f.BlobKeyColumn }})
+	}
+{{- end }}
+{{- end }}
+
+{{- if not $.IsView }}
 // Update returns a builder for updating this {{ $.Name }}.
 // Note that you need to call {{ $.Name }}.Unwrap() before calling this method if this {{ $.Name }}
 // was returned from a transaction, and the transaction was committed or rolled back.
 func ({{ $receiver }} *{{ $.Name }}) Update() *{{ $.UpdateOneName }} {
-	return (&{{ $.Name }}Client{config: {{ $receiver }}.config}).UpdateOne({{ $receiver }})
+	return New{{ $.ClientName }}({{ $receiver }}.config).UpdateOne({{ $receiver }})
 }
+{{- end }}
 
 // Unwrap unwraps the {{ $.Name }} entity that was returned from a transaction after it was closed,
 // so that all future queries will be executed through the driver which created the transaction.
 func ({{ $receiver }} *{{ $.Name }}) Unwrap() *{{ $.Name }} {
-	tx, ok := {{ $receiver }}.config.driver.(*txDriver)
+	_tx, ok := {{ $receiver }}.config.driver.(*txDriver)
 	if !ok {
 		panic("{{ $pkg }}: {{ $.Name }} is not a transactional entity")
 	}
-	{{ $receiver }}.config.driver = tx.drv
+	{{ $receiver }}.config.driver = _tx.drv
 	return {{ $receiver }}
 }
 
@@ -127,12 +154,6 @@ type {{ $slice }} []*{{ $.Name }}
 	{{ $tmpl := printf "dialect/%s/decode/many" $.Storage }}
 	{{ xtemplate $tmpl . }}
 {{ end }}
-
-func ({{ $receiver }} {{ $slice }}) config(cfg config) {
-	for _i := range {{ $receiver }} {
-		{{ $receiver }}[_i].config = cfg
-	}
-}
 {{ end }}
 
 {{/* A template to generate a fmt.Stringer implementation. */}}
@@ -143,15 +164,21 @@ func ({{ $receiver }} {{ $slice }}) config(cfg config) {
 	func ({{ $receiver }} *{{ $.Name }}) String() string {
 		var builder strings.Builder
 		builder.WriteString("{{ $.Name }}(")
-		builder.WriteString(fmt.Sprintf("id=%v", {{ $receiver }}.ID))
+		{{- if $.HasOneFieldID }}
+			builder.WriteString(fmt.Sprintf("id=%v{{ if $.Fields }}, {{ end }}", {{ $receiver }}.ID))
+		{{- end }}
 		{{- range $i, $f := $.Fields }}
+			{{- if $f.IsBlobLazy }}{{ continue }}{{ end }}
+			{{- if ne $i 0 }}
+				builder.WriteString(", ")
+			{{- end }}
 			{{- if $f.Sensitive }}
-				builder.WriteString(", {{ $f.Name }}={{ print "<sensitive>" }}")
+				builder.WriteString("{{ $f.Name }}={{ print "<sensitive>" }}")
 			{{- else }}
 				{{- $sf := printf "%s.%s" $receiver $f.StructField }}
 				{{- if $f.Nillable }}
 					if v := {{ $sf }}; v != nil {
-						builder.WriteString(", {{ $f.Name }}=")
+						builder.WriteString("{{ $f.Name }}=")
 						{{- if and $f.IsTime (not $f.HasGoType) }}
 							builder.WriteString(v.Format(time.ANSIC))
 						{{- else if and $f.IsString (not $f.HasGoType) }}
@@ -161,7 +188,7 @@ func ({{ $receiver }} {{ $slice }}) config(cfg config) {
 						{{- end }}
 					}
 				{{- else }}
-					builder.WriteString(", {{ $f.Name }}=")
+					builder.WriteString("{{ $f.Name }}=")
 					{{- if and $f.IsTime (not $f.HasGoType) }}
 						builder.WriteString({{ $sf }}.Format(time.ANSIC))
 					{{- else if and $f.IsString (not $f.HasGoType) }}
@@ -176,6 +203,17 @@ func ({{ $receiver }} {{ $slice }}) config(cfg config) {
 		return builder.String()
 	}
 {{ end }}
+
+{{/* A template for generating the Entity's comment. */}}
+{{- define "model/comment" }}
+	{{- if and $.Annotations.Comment $.Annotations.Comment.Text }}
+		{{- range $line := split $.Annotations.Comment.Text "\n" }}
+			// {{ $line }}
+		{{- end }}
+	{{- else }}
+		// {{ $.Name }} is the model entity for the {{ $.Name }} schema.
+	{{- end }}
+{{- end }}
 
 {{/* A template for generating the tag of the Edges struct-field. */}}
 {{- define "model/edgetags" }}
@@ -198,15 +236,31 @@ func ({{ $receiver }} {{ $slice }}) config(cfg config) {
 
 {{/* A template for setting the field comment. */}}
 {{- define "model/fieldcomment" }}
-	// {{ $.StructField }} holds the value of the "{{ $.Name }}" field.
 	{{- if $.Comment }}
 		{{- range $line := split $.Comment "\n" }}
 			// {{ $line }}
 		{{- end }}
+	{{- else }}
+		// {{ $.StructField }} holds the value of the "{{ $.Name }}" field.
+	{{- end }}
+	{{- if $.IsDeprecated }}
+		//
+		// Deprecated: {{ with $.DeprecationReason }}{{ . }}{{ else }}Field "{{ $.Name }}" was marked as deprecated in the schema.{{ end }}
 	{{- end }}
 {{- end }}
 
-{{/* A template for adding additional methods or helpers for the generated model.*/}}
+{{/* A template for setting the edge comment. */}}
+{{- define "model/edgecomment" }}
+	{{- if $.Comment }}
+		{{- range $line := split $.Comment "\n" }}
+			// {{ $line }}
+		{{- end }}
+	{{- else }}
+		// {{ $.StructField }} holds the value of the {{ $.Name }} edge.
+	{{- end }}
+{{- end }}
+
+{{/* A template for adding additional methods or helpers for the generated model. */}}
 {{ define "model/additional" }}
 	{{- with $tmpls := matchTemplate "model/additional/*"  }}
 		{{- range $tmpl := $tmpls }}
@@ -215,6 +269,21 @@ func ({{ $receiver }} {{ $slice }}) config(cfg config) {
 	{{- end }}
 
 	{{- with $tmpls := matchTemplate (printf "dialect/%s/model/additional/*" $.Storage) }}
+		{{- range $tmpl := $tmpls }}
+			{{- xtemplate $tmpl $ }}
+		{{- end }}
+	{{- end }}
+{{ end }}
+
+{{/* A template for adding additional fields for the Edges object of the generated model. */}}
+{{ define "model/edges/fields/additional" }}
+	{{- with $tmpls := matchTemplate "model/edges/fields/additional/*"  }}
+		{{- range $tmpl := $tmpls }}
+			{{- xtemplate $tmpl $ }}
+		{{- end }}
+	{{- end }}
+
+	{{- with $tmpls := matchTemplate (printf "dialect/%s/model/edges/fields/additional/*" $.Storage) }}
 		{{- range $tmpl := $tmpls }}
 			{{- xtemplate $tmpl $ }}
 		{{- end }}

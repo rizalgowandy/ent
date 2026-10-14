@@ -8,26 +8,38 @@ in the LICENSE file in the root directory of this source tree.
 
 {{ define "import" }}
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strings"
+	"sync"
 	"time"
-	{{- /* Ignore generting on graph specififc templates */}}
-	{{- if not (eq $.Config.Package $.Package) }}
+	{{- /* Ignore generating on graph templates (e.g. config.tmpl, client.tmpl, etc). */}}
+	{{- if ne $.Config.Package $.Package }}
 		"{{ $.Config.Package }}/predicate"
-		{{- with $.ID.Type.PkgPath }}
-			"{{ . }}"
+		{{- if $.HasOneFieldID }}
+			{{- with $.ID.Type.PkgPath }}
+				{{- $name := $.ID.Type.PkgName }}
+				{{ if ne $name (base $.ID.Type.PkgPath) }}{{ $name }} {{ end }}"{{ . }}"
+			{{- end }}
 		{{- end }}
 		{{- /* Import external packages */}}
         {{- template "import/types" $ }}
 	{{- end }}
 	"entgo.io/ent"
 	"entgo.io/ent/dialect"
+	"entgo.io/ent/schema/field"
 	{{- with $.Storage }}
 		{{- range $import := .Imports }}
 			"{{ $import }}"
+		{{- end }}
+	{{- end }}
+	{{- if and (hasField $ "Scope") ($.Scope.Imports) }}
+		{{- range $import := $.Scope.Imports }}
+			{{ $import.Alias }} "{{ $import.Path }}"
 		{{- end }}
 	{{- end }}
 	{{- template "import/additional" $ }}
@@ -36,11 +48,24 @@ import (
 
 {{/* A template for importing fields with custom types */}}
 {{ define "import/types" -}}
-	{{- $fields := $.Fields }}{{ if $.ID.UserDefined }}{{ $fields = append $fields $.ID }}{{ end }}
+	{{- $seen := dict }}
+	{{- $selfPkg := "" }}{{ if ne $.Config.Package $.Package }}{{ $selfPkg = print $.Config.Package "/" $.PackageDir }}{{ end }}
+	{{- $fields := $.Fields }}{{ if $.HasOneFieldID }}{{ if $.ID.UserDefined }}{{ $fields = append $fields $.ID }}{{ end }}{{ end }}
 	{{- range $f := $fields }}
 		{{- $pkg := $f.Type.PkgPath }}
-		{{- if and $pkg (not (hasImport (base $pkg ))) }}
-			"{{ $pkg }}"
+		{{- if and $pkg (not (hasImport (base $pkg))) (not (hasKey $seen $pkg)) (ne $pkg $selfPkg) }}
+			{{- $name := $f.Type.PkgName }}
+			{{ if ne $name (base $pkg) }}{{ $name }} {{ end}}"{{ $pkg }}"
+			{{- $seen = set $seen $pkg true }}
+		{{- end }}
+	{{- end }}
+	{{- /* Import packages for edge target ID types referenced in mutation fields. */}}
+	{{- range $e := $.EdgesWithID }}
+		{{- $pkg := $e.Type.ID.Type.PkgPath }}
+		{{- if and $pkg (not (hasImport (base $pkg))) (not (hasKey $seen $pkg)) (ne $pkg $selfPkg) }}
+			{{- $name := $e.Type.ID.Type.PkgName }}
+			{{ if ne $name (base $pkg) }}{{ $name }} {{ end}}"{{ $pkg }}"
+			{{- $seen = set $seen $pkg true }}
 		{{- end }}
 	{{- end }}
 {{- end }}

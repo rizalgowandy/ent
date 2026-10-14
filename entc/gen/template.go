@@ -29,6 +29,7 @@ type (
 	// each Type object of the graph.
 	TypeTemplate struct {
 		Name           string             // template name.
+		Cond           func(*Type) bool   // condition to apply the template.
 		Format         func(*Type) string // file name format.
 		ExtendPatterns []string           // extend patterns.
 	}
@@ -47,6 +48,7 @@ var (
 	Templates = []TypeTemplate{
 		{
 			Name:   "create",
+			Cond:   notView,
 			Format: pkgf("%s_create.go"),
 			ExtendPatterns: []string{
 				"dialect/*/create/fields/additional/*",
@@ -55,10 +57,12 @@ var (
 		},
 		{
 			Name:   "update",
+			Cond:   notView,
 			Format: pkgf("%s_update.go"),
 		},
 		{
 			Name:   "delete",
+			Cond:   notView,
 			Format: pkgf("%s_delete.go"),
 		},
 		{
@@ -82,10 +86,20 @@ var (
 		{
 			Name: "meta",
 			Format: func(t *Type) string {
-				return fmt.Sprintf("%s/%s.go", t.Package(), t.Package())
+				return fmt.Sprintf("%[1]s/%[1]s.go", t.PackageDir())
 			},
 			ExtendPatterns: []string{
 				"meta/additional/*",
+			},
+		},
+		{
+			Name:   "mutation",
+			Cond:   notView,
+			Format: func(t *Type) string {
+				return fmt.Sprintf("%s/mutation.go", t.PackageDir())
+			},
+			ExtendPatterns: []string{
+				"mutation/fields/*",
 			},
 		},
 	}
@@ -104,22 +118,11 @@ var (
 			},
 		},
 		{
-			Name:   "context",
-			Format: "context.go",
-		},
-		{
 			Name:   "tx",
 			Format: "tx.go",
 		},
 		{
-			Name:   "config",
-			Format: "config.go",
-			ExtendPatterns: []string{
-				"dialect/*/config/*/*",
-			},
-		},
-		{
-			Name:   "mutation",
+			Name:   "mutation_graph",
 			Format: "mutation.go",
 		},
 		{
@@ -148,6 +151,13 @@ var (
 			},
 		},
 		{
+			Name:   "intercept",
+			Format: "intercept/intercept.go",
+			Skip: func(g *Graph) bool {
+				return !g.featureEnabled(FeatureIntercept)
+			},
+		},
+		{
 			Name:   "entql",
 			Format: "entql.go",
 			Skip: func(g *Graph) bool {
@@ -167,11 +177,14 @@ var (
 			Format: "runtime/runtime.go",
 		},
 	}
+	// template files that were deleted and should be removed by the codegen.
+	deletedTemplates = []string{"config.go", "context.go"}
 	// patterns for extending partial-templates (included by other templates).
 	partialPatterns = [...]string{
 		"client/additional/*",
 		"client/additional/*/*",
 		"config/*/*",
+		"config/*/*/*",
 		"create/additional/*",
 		"delete/additional/*",
 		"dialect/*/*/*/spec/*",
@@ -181,26 +194,52 @@ var (
 		"dialect/*/query/selector/*",
 		"dialect/sql/create/additional/*",
 		"dialect/sql/create_bulk/additional/*",
+		"dialect/sql/meta/constants/*",
 		"dialect/sql/model/additional/*",
+		"dialect/sql/model/edges/*",
+		"dialect/sql/model/edges/fields/additional/*",
 		"dialect/sql/model/fields/*",
 		"dialect/sql/select/additional/*",
 		"dialect/sql/predicate/edge/*/*",
 		"dialect/sql/query/additional/*",
+		"dialect/sql/query/all/nodes/*",
 		"dialect/sql/query/from/*",
 		"dialect/sql/query/path/*",
+		"dialect/sql/query/*/*/*",
 		"import/additional/*",
 		"model/additional/*",
 		"model/comment/additional/*",
+		"model/edges/fields/additional/*",
+		"tx/additional/*",
+		"tx/additional/*/*",
 		"update/additional/*",
 		"query/additional/*",
+		"privacy/additional/*",
+		"privacy/additional/*/*",
+		"mutation/fields/*",
 	}
-	// importPkg are the import packages used for code generation.
-	importPkg = make(map[string]string)
 	// templates holds the Go templates for the code generation.
 	templates *Template
 	//go:embed template/*
 	templateDir embed.FS
+	// importPkg are the import packages used for code generation.
+	// Extended by the function below on generation initialization.
+	importPkg = map[string]string{
+		"context": "context",
+		"driver":  "database/sql/driver",
+		"errors":  "errors",
+		"fmt":     "fmt",
+		"math":    "math",
+		"strings": "strings",
+		"time":    "time",
+		"ent":     "entgo.io/ent",
+		"dialect": "entgo.io/ent/dialect",
+		"field":   "entgo.io/ent/schema/field",
+	}
 )
+
+// notView reports if the given type is not a view.
+func notView(t *Type) bool { return !t.IsView() }
 
 func initTemplates() {
 	templates = MustParse(NewTemplate("templates").
@@ -225,7 +264,8 @@ func initTemplates() {
 // provide additional functionality for ent extensions.
 type Template struct {
 	*template.Template
-	FuncMap template.FuncMap
+	FuncMap   template.FuncMap
+	condition func(*Graph) bool
 }
 
 // NewTemplate creates an empty template with the standard codegen functions.
@@ -245,6 +285,12 @@ func (t *Template) Funcs(funcMap template.FuncMap) *Template {
 			t.FuncMap[name] = f
 		}
 	}
+	return t
+}
+
+// SkipIf allows registering a function to determine if the template needs to be skipped or not.
+func (t *Template) SkipIf(cond func(*Graph) bool) *Template {
+	t.condition = cond
 	return t
 }
 
@@ -405,7 +451,7 @@ func (d *Dependency) defaultName() (string, error) {
 }
 
 func pkgf(s string) func(t *Type) string {
-	return func(t *Type) string { return fmt.Sprintf(s, t.Package()) }
+	return func(t *Type) string { return fmt.Sprintf(s, t.PackageDir()) }
 }
 
 // match reports if the given name matches the extended pattern.

@@ -17,7 +17,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func Example_Traversal() {
+func Example_traversal() {
 	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
 	if err != nil {
 		log.Fatalf("failed opening connection to sqlite: %v", err)
@@ -118,7 +118,7 @@ func Gen(ctx context.Context, client *ent.Client) error {
 func Traverse(ctx context.Context, client *ent.Client) error {
 	owner, err := client.Group. // GroupClient.
 					Query().                     // Query builder.
-					Where(group.Name("Github")). // Filter only Github group (only 1).
+					Where(group.Name("Github")). // Filter only GitHub group (only 1).
 					QueryAdmin().                // Getting Dan.
 					QueryFriends().              // Getting Dan's friends: [Ariel].
 					QueryPets().                 // Their pets: [Pedro, Xabi].
@@ -223,7 +223,7 @@ func WithTx(ctx context.Context, client *ent.Client, fn func(tx *ent.Tx) error) 
 	}()
 	if err := fn(tx); err != nil {
 		if rerr := tx.Rollback(); rerr != nil {
-			err = fmt.Errorf("rolling back transaction: %w", rerr)
+			err = fmt.Errorf("%w: rolling back transaction: %v", err, rerr)
 		}
 		return err
 	}

@@ -21,7 +21,8 @@ sidebar_label: FAQ
 [How to store Protobuf objects in a BLOB column?](#how-to-store-protobuf-objects-in-a-blob-column)  
 [How to add `CHECK` constraints to table?](#how-to-add-check-constraints-to-table)  
 [How to define a custom precision numeric field?](#how-to-define-a-custom-precision-numeric-field)  
-[How to configure two or more `DB` to separate read and write?](#how-to-configure-two-or-more-db-to-separate-read-and-write)
+[How to configure two or more `DB` to separate read and write?](#how-to-configure-two-or-more-db-to-separate-read-and-write)  
+[How to configure `json.Marshal` to inline the `edges` keys in the top level object?](#how-to-configure-jsonmarshal-to-inline-the-edges-keys-in-the-top-level-object)
 
 ## Answers
 
@@ -38,7 +39,7 @@ use the following template:
 ```gotemplate
 {{ range $n := $.Nodes }}
     {{ $builder := $n.CreateName }}
-    {{ $receiver := receiver $builder }}
+    {{ $receiver := $n.CreateReceiver }}
 
     func ({{ $receiver }} *{{ $builder }}) Set{{ $n.Name }}(input *{{ $n.Name }}) *{{ $builder }} {
         {{- range $f := $n.Fields }}
@@ -219,7 +220,7 @@ option for doing it as follows:
 
 #### How to define a network address field in PostgreSQL?
 
-The [GoType](schema-fields.md#go-type) and the [SchemaType](schema-fields.md#database-type)
+The [GoType](schema-fields.mdx#go-type) and the [SchemaType](schema-fields.mdx#database-type)
 options allow users to define database-specific fields. For example, in order to define a
  [`macaddr`](https://www.postgresql.org/docs/13/datatype-net-types.html#DATATYPE-MACADDR) field, use the following configuration:
 
@@ -244,7 +245,7 @@ type MAC struct {
 }
 
 // Scan implements the Scanner interface.
-func (m *MAC) Scan(value interface{}) (err error) {
+func (m *MAC) Scan(value any) (err error) {
 	switch v := value.(type) {
 	case nil:
 	case []byte:
@@ -290,16 +291,16 @@ type Inet struct {
 }
 
 // Scan implements the Scanner interface
-func (i *Inet) Scan(value interface{}) (err error) {
+func (i *Inet) Scan(value any) (err error) {
     switch v := value.(type) {
     case nil:
     case []byte:
         if i.IP = net.ParseIP(string(v)); i.IP == nil {
-            err = fmt.Errorf("invalid value for ip %q", s)
+            err = fmt.Errorf("invalid value for ip %q", v)
         }
     case string:
         if i.IP = net.ParseIP(v); i.IP == nil {
-            err = fmt.Errorf("invalid value for ip %q", s)
+            err = fmt.Errorf("invalid value for ip %q", v)
         }
     default:
         err = fmt.Errorf("unexpected type %T", v)
@@ -338,7 +339,7 @@ To achieve this, you can either make use of `DefaultFunc` or of schema hooks -
 depending on your use case. If the generator does not return an error,
 `DefaultFunc` is more concise, whereas setting a hook on resource creation
 will allow you to capture errors as well. An example of how to use
-`DefaultFunc` can be seen in the section regarding [the ID field](schema-fields.md#id-field).
+`DefaultFunc` can be seen in the section regarding [the ID field](schema-fields.mdx#id-field).
 
 Here is an example of how to use a custom generator with hooks, taking as an
 example [sonyflake](https://github.com/sony/sonyflake).
@@ -401,9 +402,9 @@ func (User) Mixin() []ent.Mixin {
 #### How to use a custom XID globally unique ID?
 
 Package [xid](https://github.com/rs/xid) is a globally unique ID generator library that uses the [Mongo Object ID](https://docs.mongodb.org/manual/reference/object-id/)
-algorithm to generate a 12 byte, 20 character ID with no configuration. The xid package comes with [database/sql](https://golang.org/pkg/database/sql) `sql.Scanner` and `driver.Valuer` interfaces required by Ent for serialization.
+algorithm to generate a 12 byte, 20 character ID with no configuration. The xid package comes with [database/sql](https://pkg.go.dev/database/sql) `sql.Scanner` and `driver.Valuer` interfaces required by Ent for serialization.
 
-To store an XID in any string field use the [GoType](schema-fields.md#go-type) schema configuration:
+To store an XID in any string field use the [GoType](schema-fields.mdx#go-type) schema configuration:
 
 ```go
 // Fields of type T.
@@ -460,7 +461,7 @@ In order to use extended identifiers (XIDs) with gqlgen, follow the configuratio
 
 #### How to define a spatial data type field in MySQL?
 
-The [GoType](schema-fields.md#go-type) and the [SchemaType](schema-fields.md#database-type)
+The [GoType](schema-fields.mdx#go-type) and the [SchemaType](schema-fields.mdx#database-type)
 options allow users to define database-specific fields. For example, in order to define a
 [`POINT`](https://dev.mysql.com/doc/refman/8.0/en/spatial-type-overview.html) field, use the following configuration:
 
@@ -493,7 +494,7 @@ import (
 type Point [2]float64
 
 // Scan implements the Scanner interface.
-func (p *Point) Scan(value interface{}) error {
+func (p *Point) Scan(value any) error {
 	bin, ok := value.([]byte)
 	if !ok {
 		return fmt.Errorf("invalid binary value for point")
@@ -578,7 +579,7 @@ func (x *Hi) Value() (driver.Value, error) {
 	return proto.Marshal(x)
 }
 
-func (x *Hi) Scan(src interface{}) error {
+func (x *Hi) Scan(src any) error {
 	if src == nil {
 		return nil
 	}
@@ -661,8 +662,8 @@ func (User) Annotations() []schema.Annotation {
 
 #### How to define a custom precision numeric field?
 
-Using [GoType](schema-fields.md#go-type) and [SchemaType](schema-fields.md#database-type) it is possible to define
-custom precision numeric fields. For example, defining a field that uses [big.Int](https://golang.org/pkg/math/big/).
+Using [GoType](schema-fields.mdx#go-type) and [SchemaType](schema-fields.mdx#database-type) it is possible to define
+custom precision numeric fields. For example, defining a field that uses [big.Int](https://pkg.go.dev/math/big).
 
 ```go
 func (T) Fields() []ent.Field {
@@ -680,7 +681,7 @@ type BigInt struct {
 	big.Int
 }
 
-func (b *BigInt) Scan(src interface{}) error {
+func (b *BigInt) Scan(src any) error {
 	var i sql.NullString
 	if err := i.Scan(src); err != nil {
 		return err
@@ -721,18 +722,22 @@ func main() {
 	// Use the client here.
 }
 
-
 type multiDriver struct {
 	r, w dialect.Driver
 }
 
 var _ dialect.Driver = (*multiDriver)(nil)
 
-func (d *multiDriver) Query(ctx context.Context, query string, args, v interface{}) error {
-	return d.r.Query(ctx, query, args, v)
+func (d *multiDriver) Query(ctx context.Context, query string, args, v any) error {
+	e := d.r
+	// Mutation statements that use the RETURNING clause.
+	if ent.QueryFromContext(ctx) == nil {
+		e = d.w
+	}
+	return e.Query(ctx, query, args, v)
 }
 
-func (d *multiDriver) Exec(ctx context.Context, query string, args, v interface{}) error {
+func (d *multiDriver) Exec(ctx context.Context, query string, args, v any) error {
 	return d.w.Exec(ctx, query, args, v)
 }
 
@@ -757,5 +762,88 @@ func (d *multiDriver) Close() error {
 	}
 	return nil
 }
+
+func (d *multiDriver) Dialect() string {
+	return d.r.Dialect()
+}
 ```
 
+#### How to configure `json.Marshal` to inline the `edges` keys in the top level object?
+
+To encode entities without the `edges` attribute, users can follow these two steps:
+
+1. Omit the default `edges` tag generated by Ent.
+2. Extend the generated models with a custom MarshalJSON method.
+
+These two steps can be automated using [codegen extensions](extension.md), and a full working example is available under
+the [examples/jsonencode](https://github.com/ent/ent/tree/master/examples/jsonencode) directory.
+
+```go title="ent/entc.go" {17,28}
+//go:build ignore
+// +build ignore
+
+package main
+
+import (
+	"log"
+
+	"entgo.io/ent/entc"
+	"entgo.io/ent/entc/gen"
+	"entgo.io/ent/schema/edge"
+)
+
+func main() {
+	opts := []entc.Option{
+		entc.Extensions{
+			&EncodeExtension{},
+		),
+	}
+	err := entc.Generate("./schema", &gen.Config{}, opts...)
+	if err != nil {
+		log.Fatalf("running ent codegen: %v", err)
+	}
+}
+
+// EncodeExtension is an implementation of entc.Extension that adds a MarshalJSON
+// method to each generated type <T> and inlines the Edges field to the top level JSON.
+type EncodeExtension struct {
+	entc.DefaultExtension
+}
+
+// Templates of the extension.
+func (e *EncodeExtension) Templates() []*gen.Template {
+	return []*gen.Template{
+		gen.MustParse(gen.NewTemplate("model/additional/jsonencode").
+			Parse(`
+{{ if $.Edges }}
+	// MarshalJSON implements the json.Marshaler interface.
+	func ({{ $.Receiver }} *{{ $.Name }}) MarshalJSON() ([]byte, error) {
+		type Alias {{ $.Name }}
+		return json.Marshal(&struct {
+			*Alias
+			{{ $.Name }}Edges
+		}{
+			Alias: (*Alias)({{ $.Receiver }}),
+			{{ $.Name }}Edges: {{ $.Receiver }}.Edges,
+		})
+	}
+{{ end }}
+`)),
+	}
+}
+
+// Hooks of the extension.
+func (e *EncodeExtension) Hooks() []gen.Hook {
+	return []gen.Hook{
+		func(next gen.Generator) gen.Generator {
+			return gen.GenerateFunc(func(g *gen.Graph) error {
+				tag := edge.Annotation{StructTag: `json:"-"`}
+				for _, n := range g.Nodes {
+					n.Annotations.Set(tag.Name(), tag)
+				}
+				return next.Generate(g)
+			})
+		},
+	}
+}
+```
